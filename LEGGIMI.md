@@ -2,6 +2,19 @@
 
 Commit di riferimento: `9c16c9b09e5be534780503689411404e68f670be`, quello che lo stage verifica.
 
+**Disposizione delle cartelle.** Gli script di stage stanno in `stage/`. Si copiano nella cartella di lavoro
+(`BASE_DIR`, quella dello script), accanto a questo repository clonato col nome `anyps5_freebsd_patches`:
+
+    BASE_DIR/
+        anyps5_freebsd_stage1_v1_2.sh   relinker nativo e correzioni CMake della fase 1
+        anyps5_freebsd_stage2.sh        suite di test e audit di portabilita'
+        anyps5_freebsd_stage3_v1_3.sh   patch, FFmpeg, configure e build del runtime
+        anyps5_freebsd_patches/         questo repository
+        AnyPS5-work/                    creata dagli stage (checkout e build)
+
+Ordine: stage 1 (relinker), stage 2 (test e audit della build del relinker, facoltativo), stage 3 (`patch`,
+`configure`, `build`).
+
 **Come si applica.** Le applica `anyps5_freebsd_stage3_v1_3.sh`, nelle modalita `patch`, `configure` e `build`, in
 ordine numerico. Ogni patch e' un `git diff` con percorsi relativi al checkout `AnyPS5-work/source`.
 - Una patch gia' applicata si riconosce con `git apply --reverse --check` e si salta.

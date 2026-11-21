@@ -1,0 +1,168 @@
+diff --git a/core/libs/prx/libkernel/CMakeLists.txt b/core/libs/prx/libkernel/CMakeLists.txt
+index 8c9f8f3..31592c9 100644
+--- a/core/libs/prx/libkernel/CMakeLists.txt
++++ b/core/libs/prx/libkernel/CMakeLists.txt
+@@ -780,7 +780,7 @@ if(BUILD_TESTING)
+         set_tests_properties(guest_kernel_pthread_once PROPERTIES ENVIRONMENT_MODIFICATION
+             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+     endif()
+-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         add_test_executable(guest_main_stack_tests ${LIBS_INCLUDE_DIR}/tests/GuestMainStack.cpp)
+         target_include_directories(guest_main_stack_tests PRIVATE ${LIBS_INCLUDE_DIR})
+         target_link_libraries(guest_main_stack_tests PRIVATE libkernel libc)
+diff --git a/core/libs/prx/libkernel/Pthread/include/Pthread.hpp b/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
+index 757068f..d3947ff 100644
+--- a/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
++++ b/core/libs/prx/libkernel/Pthread/include/Pthread.hpp
+@@ -221,7 +221,7 @@ bool GetLiveGuestThreadSched_nid_no_patch(std::int64_t tid, int& policy, int& pr
+ bool SetLiveGuestThreadAffinity_nid_no_patch(std::int64_t tid, KernelCpumask mask);
+ extern "C" std::size_t GetDefaultStackSize_nid_no_patch();
+ extern "C" bool SetDefaultStackSize_nid_no_patch(std::size_t size);
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ extern "C" [[noreturn]] void APS5_VABI EnterGuestMainStack_nid_no_patch(void* arguments, void (APS5_VABI* entry)(void*));
+ #endif
+ 
+diff --git a/core/libs/prx/libkernel/Pthread/src/Thread.cpp b/core/libs/prx/libkernel/Pthread/src/Thread.cpp
+index f820550..f98cb1d 100644
+--- a/core/libs/prx/libkernel/Pthread/src/Thread.cpp
++++ b/core/libs/prx/libkernel/Pthread/src/Thread.cpp
+@@ -55,6 +55,8 @@
+ #include <sys/syscall.h>
+ #elif defined(__FreeBSD__)
+ #include <pthread_np.h>
++#include <sys/thr.h>
++#include <prx/libc/include/specifics/freebsd/Compat.hpp>
+ #else
+ static const auto initialThreadId = std::this_thread::get_id();
+ #endif
+@@ -127,7 +129,7 @@ static GuestThreadState& CurrentGuestState() {
+ static std::mutex& stackLock = *new std::mutex();
+ static auto& liveStacks = *new std::map<PthreadPrivate*, std::pair<std::uintptr_t, std::uintptr_t>>();
+ static auto& protectedStackPages = *new std::map<std::uintptr_t, std::size_t>();
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ struct GuestStackMapping {
+     std::uintptr_t mappingEnd;
+     std::uintptr_t stackStart;
+@@ -154,7 +156,7 @@ static std::atomic<std::uintptr_t> guestMainStackLow{0};
+ static std::atomic<std::uintptr_t> guestMainStackHigh{0};
+ #endif
+ 
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ static constexpr std::size_t GUEST_STACK_GUARD = PS5_PAGE_SIZE;
+ 
+ struct RetiredStack {
+@@ -334,9 +336,14 @@ static void FreeGuestStack(PthreadPrivate* thread) {
+ 
+ static bool HostThreadGone(int hostTid) {
+     if (hostTid == 0) return false;
++#if defined(__FreeBSD__)
++    // No /proc/self/task on FreeBSD: thr_kill(2) with signal 0 only looks the thread up, ESRCH once it has exited.
++    return thr_kill(hostTid, 0) != 0 && errno == ESRCH;
++#else
+     char path[48];
+     std::snprintf(path, sizeof(path), "/proc/self/task/%d", hostTid);
+     return access(path, F_OK) != 0;
++#endif
+ }
+ 
+ static void ReapRetiredStacks() {
+@@ -390,7 +397,7 @@ static std::uintptr_t PrecommittedStackStart(std::uintptr_t low, std::uintptr_t
+ #endif
+ 
+ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+     const auto mainLow = guestMainStackLow.load(std::memory_order_acquire);
+     const auto mainHigh = guestMainStackHigh.load(std::memory_order_acquire);
+     const auto frame = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+@@ -573,7 +580,7 @@ bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintpt
+ }
+ 
+ bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end) {
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+     std::lock_guard lock(guestStackMappingsLock);
+     auto it = guestStackMappings.upper_bound(start);
+     if (it != guestStackMappings.begin()) --it;
+@@ -1187,7 +1194,7 @@ static void* StartNativeThread(void* opaque) {
+             throw std::runtime_error("Cannot query guest thread stack");
+         self->stackAddress = reinterpret_cast<void*>((high - reserve - self->stackSize) & ~std::uintptr_t{PS5_PAGE_SIZE - 1});
+         self->threadId = std::this_thread::get_id();
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+         self->hostTid = static_cast<int>(gettid());
+         RegisterGuestStackMapping(self);
+ #endif
+@@ -1296,7 +1303,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
+     sigset_t creatorMask;
+     pthread_sigmask(SIG_SETMASK, nullptr, &creatorMask);
+     args->signalMask = creatorMask;
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+     ReapRetiredStacks();
+     AllocateGuestStack(p.get(), nativeStack);
+ #endif
+@@ -1307,7 +1314,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
+         FreeGuestStack(p.get());
+         throw std::system_error(result, std::generic_category(), "Creating guest thread");
+     }
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+     int created = pthread_attr_setstack(&nativeAttr, static_cast<char*>(p->guestStack) + GUEST_STACK_GUARD, p->guestStackBytes - GUEST_STACK_GUARD);
+ #else
+     int created = pthread_attr_setstacksize(&nativeAttr, nativeStack);
+diff --git a/core/libs/tests/GuestMainStack.cpp b/core/libs/tests/GuestMainStack.cpp
+index fdb2bf4..3c219dc 100644
+--- a/core/libs/tests/GuestMainStack.cpp
++++ b/core/libs/tests/GuestMainStack.cpp
+@@ -11,6 +11,13 @@
+ #include <dlfcn.h>
+ #include <stdexcept>
+ #include <string>
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <unistd.h>
++#include <vector>
++#endif
+ 
+ #ifdef ANYPS5_ENABLE_ASAN
+ static constexpr std::uintptr_t GuestArenaOffset = 0x0000100000000000ull;
+@@ -26,6 +33,24 @@ static Pthread initialThread = nullptr;
+ #define Require(value) do { if (!(value)) { std::fprintf(stderr, "GuestMainStack failed at line %d\n", __LINE__); std::_Exit(1); } } while (false)
+ 
+ static char Permissions(std::uintptr_t address) {
++#if defined(__FreeBSD__)
++    // No /proc/self/maps: the same answer from the kern.proc.vmmap records.
++    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, static_cast<int>(getpid())};
++    std::size_t length = 0;
++    Require(sysctl(mib, 4, nullptr, &length, nullptr, 0) == 0);
++    length += length / 3;
++    std::vector<char> buffer(length);
++    Require(sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0);
++    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
++        const auto* entry = reinterpret_cast<const struct kinfo_vmentry*>(buffer.data() + offset);
++        if (entry->kve_structsize <= 0) break;
++        offset += static_cast<std::size_t>(entry->kve_structsize);
++        if (address < entry->kve_start || address >= entry->kve_end) continue;
++        const bool readable = (entry->kve_protection & KVME_PROT_READ) != 0;
++        return readable && (entry->kve_protection & KVME_PROT_WRITE) != 0 ? 'w' : readable ? 'r' : '-';
++    }
++    return 0;
++#else
+     std::FILE* maps = std::fopen("/proc/self/maps", "r");
+     Require(maps != nullptr);
+     char result = 0;
+@@ -40,6 +65,7 @@ static char Permissions(std::uintptr_t address) {
+     }
+     std::fclose(maps);
+     return result;
++#endif
+ }
+ 
+ struct WorkerContext {

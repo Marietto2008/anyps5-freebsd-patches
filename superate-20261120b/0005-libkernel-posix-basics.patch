@@ -1,0 +1,193 @@
+diff --git a/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp b/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
+index 0d1672c..5add812 100644
+--- a/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
++++ b/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
+@@ -580,7 +580,11 @@ bool HasUnpairedMove(const std::vector<HostEvent>& events, std::size_t first) {
+ 
+ int WaitForRenamesInProgress(const HostWatch& host) {
+     char entries[1024];
++#if defined(__FreeBSD__)
++    if (::getdents(host.entries, entries, sizeof(entries)) < 0 && errno != ENOENT) {
++#else
+     if (::getdents64(host.entries, entries, sizeof(entries)) < 0 && errno != ENOENT) {
++#endif
+         return errno;
+     }
+     return 0;
+diff --git a/core/libs/prx/libkernel/File/src/Stdio.cpp b/core/libs/prx/libkernel/File/src/Stdio.cpp
+index 39b8f97..1768310 100644
+--- a/core/libs/prx/libkernel/File/src/Stdio.cpp
++++ b/core/libs/prx/libkernel/File/src/Stdio.cpp
+@@ -677,13 +677,15 @@ static bool NativeIsPipe(int descriptor) {
+ }
+ #else
+ #include <sys/statvfs.h>
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
++#include <sys/param.h>
+ #include <sys/mount.h>
+ #else
+ #include <sys/vfs.h>
+ #endif
+ static bool NativeIsPipe(int descriptor) {
+-#ifdef __APPLE__
++// FreeBSD, like macOS: fstatfs() of an anonymous pipe fails (EINVAL), of a named FIFO succeeds.
++#if defined(__APPLE__) || defined(__FreeBSD__)
+     struct stat file{};
+     struct statfs kind{};
+     return ::fstat(descriptor, &file) == 0 && S_ISFIFO(file.st_mode) && ::fstatfs(descriptor, &kind) != 0;
+@@ -711,7 +713,7 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
+     if (S_ISCHR(file.st_mode)) return DeviceFilesystem(fs);
+     struct statvfs host{};
+     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__) // FreeBSD statvfs has no ST_NOEXEC: use statfs MNT_NOEXEC
+     struct statfs mount{};
+     const bool noexec = ::fstatfs(descriptor, &mount) == 0 && (mount.f_flags & MNT_NOEXEC);
+ #else
+@@ -738,7 +740,7 @@ static int FillStatfs(const struct statvfs& host, bool noexec, KernelStatfs* fs)
+ static int NativeStatfs(const std::filesystem::path& path, KernelStatfs* fs) {
+     struct statvfs host{};
+     if (::statvfs(path.c_str(), &host) != 0) return SceErrorFromErrno(errno == ENOENT ? NotFoundError_nid_no_patch(path) : errno) & 0xffff;
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__) // FreeBSD statvfs has no ST_NOEXEC: use statfs MNT_NOEXEC
+     struct statfs mount{};
+     const bool noexec = ::statfs(path.c_str(), &mount) == 0 && (mount.f_flags & MNT_NOEXEC);
+ #else
+@@ -1575,7 +1577,17 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
+     return finish(index, static_cast<int>(written));
+ }
+ #else
+-static unsigned char GuestEntryType(int fd, const struct dirent64& entry, bool followLinks) {
++#if defined(__FreeBSD__)
++// FreeBSD: getdents(2) returns struct dirent, which has the fields of Linux's dirent64 (64-bit d_off since
++// FreeBSD 12) but calls the inode d_fileno.
++using HostDirent = struct dirent;
++#define APS5_HOST_DIRENT_INODE(entry) ((entry).d_fileno)
++#else
++using HostDirent = struct dirent64;
++#define APS5_HOST_DIRENT_INODE(entry) ((entry).d_ino)
++#endif
++
++static unsigned char GuestEntryType(int fd, const HostDirent& entry, bool followLinks) {
+     if (entry.d_type != DT_LNK && entry.d_type != DT_UNKNOWN) return entry.d_type;
+     if (entry.d_type == DT_LNK && !followLinks) return DT_LNK;
+     const int savedErrno = errno;
+@@ -1607,6 +1619,8 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
+     std::vector<char> host(std::min(std::max(static_cast<std::size_t>(nbytes), std::size_t{4096}), MaxHostChunk));
+ #ifdef __EMSCRIPTEN__
+     const auto read = ::getdents(fd, reinterpret_cast<struct dirent*>(host.data()), host.size());
++#elif defined(__FreeBSD__)
++    const auto read = ::getdents(fd, host.data(), host.size());
+ #else
+     const auto read = ::syscall(SYS_getdents64, fd, host.data(), host.size());
+ #endif
+@@ -1626,7 +1640,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
+         return result;
+     };
+     for (long offset = 0; offset < read;) {
+-        const auto* entry = reinterpret_cast<const struct dirent64*>(host.data() + offset);
++        const auto* entry = reinterpret_cast<const HostDirent*>(host.data() + offset);
+         const auto nameLength = std::strlen(entry->d_name);
+         const auto record = (GuestHeaderBytes + nameLength + 1 + 3) & ~std::size_t{3};
+         if (nameLength > GuestMaxName || written + record > static_cast<std::size_t>(nbytes)) {
+@@ -1635,7 +1649,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
+         }
+         staged.resize(written + record);
+         char* out = staged.data() + written;
+-        const auto fileNumber = static_cast<std::uint32_t>(entry->d_ino);
++        const auto fileNumber = static_cast<std::uint32_t>(APS5_HOST_DIRENT_INODE(*entry));
+         const auto recordLength = static_cast<std::uint16_t>(record);
+         const auto nameBytes = static_cast<std::uint8_t>(nameLength);
+         std::memcpy(out, &fileNumber, sizeof(fileNumber));
+diff --git a/core/libs/prx/libkernel/Pthread/src/Thread.cpp b/core/libs/prx/libkernel/Pthread/src/Thread.cpp
+index e8a6295..f820550 100644
+--- a/core/libs/prx/libkernel/Pthread/src/Thread.cpp
++++ b/core/libs/prx/libkernel/Pthread/src/Thread.cpp
+@@ -34,7 +34,11 @@
+ #include <system_error>
+ 
+ #ifndef _WIN32
++#if defined(__FreeBSD__)
++#include <stdlib.h> // alloca() lives here on FreeBSD (no <alloca.h>)
++#else
+ #include <alloca.h>
++#endif
+ #include <cerrno>
+ #include <csetjmp>
+ #include <csignal>
+@@ -49,6 +53,8 @@
+ 
+ #ifdef __linux__
+ #include <sys/syscall.h>
++#elif defined(__FreeBSD__)
++#include <pthread_np.h>
+ #else
+ static const auto initialThreadId = std::this_thread::get_id();
+ #endif
+@@ -56,6 +62,9 @@ static const auto initialThreadId = std::this_thread::get_id();
+ extern "C" bool IsInitialPthread_nid_no_patch() {
+ #ifdef __linux__
+     return ::syscall(SYS_gettid) == ::getpid();
++#elif defined(__FreeBSD__)
++    // FreeBSD: thread ids are lwpids, never the pid; the kernel answers the question directly.
++    return ::pthread_main_np() == 1;
+ #else
+     return std::this_thread::get_id() == initialThreadId;
+ #endif
+@@ -409,8 +418,18 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
+     static thread_local std::uintptr_t stackHigh = 0;
+     if (stackHigh == 0) {
+         pthread_attr_t attr;
++#if defined(__FreeBSD__)
++        // FreeBSD: pthread_attr_get_np() fills an attribute object that must already be initialised.
++        if (pthread_attr_init(&attr) != 0)
++            return false;
++        if (pthread_attr_get_np(pthread_self(), &attr) != 0) {
++            pthread_attr_destroy(&attr);
++            return false;
++        }
++#else
+         if (pthread_getattr_np(pthread_self(), &attr) != 0)
+             return false;
++#endif
+         void* address = nullptr;
+         std::size_t size = 0;
+         const bool queried = pthread_attr_getstack(&attr, &address, &size) == 0;
+diff --git a/core/libs/prx/libkernel/Time/Time.cpp b/core/libs/prx/libkernel/Time/Time.cpp
+index ce5f266..3f27ae9 100644
+--- a/core/libs/prx/libkernel/Time/Time.cpp
++++ b/core/libs/prx/libkernel/Time/Time.cpp
+@@ -11,6 +11,7 @@
+ #include "prx/libc/include/SonyCrt.hpp"
+ #include "prx/libc/include/GuestArena.hpp"
+ #include "prx/libc/include/GuestTime.hpp"
++#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/Pthread/include/Pthread.hpp"
+ #include <algorithm>
+@@ -291,7 +292,7 @@ static std::string DescribeCallSite(const void* caller) {
+ static unsigned long CurrentThreadIdForTrace() {
+ #ifdef _WIN32
+     return GetCurrentThreadId();
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+     return static_cast<unsigned long>(gettid());
+ #else
+     return 0;
+diff --git a/core/libs/prx/libkernel/Time/TimedWait.cpp b/core/libs/prx/libkernel/Time/TimedWait.cpp
+index 74e28a7..e23eff8 100644
+--- a/core/libs/prx/libkernel/Time/TimedWait.cpp
++++ b/core/libs/prx/libkernel/Time/TimedWait.cpp
+@@ -602,7 +602,11 @@ bool SingleWaiterCondition::waitSignal(const std::uint64_t* deadlineNanos) {
+     timespec deadline{};
+     if (deadlineNanos != nullptr) deadline = {static_cast<time_t>(*deadlineNanos / 1000000000ULL), static_cast<long>(*deadlineNanos % 1000000000ULL)};
+     for (;;) {
++#if defined(__FreeBSD__)
++        const int result = deadlineNanos == nullptr ? sem_wait(&semaphore) : sem_clockwait_np(&semaphore, CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
++#else
+         const int result = deadlineNanos == nullptr ? sem_wait(&semaphore) : sem_clockwait(&semaphore, CLOCK_MONOTONIC, &deadline);
++#endif
+         if (result == 0) return true;
+         if (errno == ETIMEDOUT) return false;
+         if (errno != EINTR) throw std::system_error(errno, std::generic_category(), "TimedWait: cannot wait for a wait semaphore");

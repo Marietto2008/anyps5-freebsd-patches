@@ -1,0 +1,52 @@
+diff --git a/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp b/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
+index 98e639e..44fc0df 100644
+--- a/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
++++ b/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
+@@ -224,6 +224,34 @@ std::uint64_t SeparateSharedLoadPages(std::vector<std::uint8_t>& buf, std::vecto
+             lowered = std::max(lowered, load.Alignment);
+         load.Alignment = std::min(load.Alignment, kDefaultLoadAlignment);
+     }
++    if (FreeBsdOutput()) {
++        // FreeBSD's image activator refuses a PT_LOAD whose first page a segment below already holds (that one's bss is
++        // mapped to its page end), where Linux maps the later segment over the shared page. The file bytes before an
++        // unaligned segment reproduce what the segments below put on that page (above), so on FreeBSD the segment
++        // starts at the page and the segments below end there.
++        for (std::size_t position = 0; position < loads.size(); ++position) {
++            auto& load = headers[loads[position]];
++            const auto prefix = load.MappedAddress % kDefaultLoadAlignment;
++            if (prefix == 0 || load.FileSize == 0)
++                continue;
++            const auto pageStart = load.MappedAddress - prefix;
++            bool shared = false;
++            for (std::size_t below = 0; below < position; ++below) {
++                auto& other = headers[loads[below]];
++                if (other.MappedAddress + other.MemorySize <= pageStart)
++                    continue;
++                shared = true;
++                other.MemorySize = other.MappedAddress < pageStart ? pageStart - other.MappedAddress : 0;
++                other.FileSize = std::min(other.FileSize, other.MemorySize);
++            }
++            if (!shared)
++                continue;
++            load.MappedAddress = pageStart;
++            load.Offset -= prefix;
++            load.FileSize += prefix;
++            load.MemorySize += prefix;
++        }
++    }
+     return lowered;
+ }
+ 
+@@ -702,7 +730,11 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
+         _appendDynEntry(dynSegBuf, DT_JMPREL, address(vaddrOfExtraBlockOffset(relaPltOff)));
+         _appendDynEntry(dynSegBuf, DT_PLTRELSZ, dynSection.RelaPltData.size());
+         _appendDynEntry(dynSegBuf, DT_PLTREL, static_cast<std::uint64_t>(DT_RELA));
+-        _appendDynEntry(dynSegBuf, DT_PLTGOT, address(originalPltGotVaddr));
++        // FreeBSD's rtld writes GOT[1] and GOT[2] whenever DT_PLTGOT is present, after the other relocations and even
++        // with BIND_NOW, where glibc leaves them alone: they are guest data (a homebrew crt keeps its init_array bounds
++        // there). Bound at load time, the table is not needed.
++        if (lazyBinding || !FreeBsdOutput())
++            _appendDynEntry(dynSegBuf, DT_PLTGOT, address(originalPltGotVaddr));
+     }
+     if (!lazyBinding)
+         _appendDynEntry(dynSegBuf, DT_FLAGS, DF_BIND_NOW);

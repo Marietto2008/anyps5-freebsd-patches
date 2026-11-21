@@ -1,0 +1,410 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c3b052f..991fe79 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -251,6 +251,13 @@ elseif(NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
+ endif()
+ 
++# AnyPS5 FreeBSD port: pthreads live in libthr, not in libc as with glibc >= 2.34. Every library and
++# executable must be linked with -pthread, otherwise executables fail on the undefined pthread_* symbols
++# of the shared libraries they link (libc, libkernel...). FreeBSD headers need nothing at compile time.
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    add_link_options(-pthread)
++endif()
++
+ if(APPLE AND NOT ANYPS5_RELINKER_ONLY)
+     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+     add_link_options(-fexperimental-library)
+@@ -1050,7 +1057,9 @@ set(ARCHITECTURE x86_64)
+ add_subdirectory(3rdparty/ffmpeg-core)
+ if(MINGW)
+     target_link_libraries(ffmpeg INTERFACE bcrypt ole32 user32 ws2_32)
+-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++# AnyPS5 FreeBSD port: as on Linux, keep the static FFmpeg symbols private to each library that links
++# them (lld supports --exclude-libs); otherwise they are exported and their PC32 references fail to link.
++elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(ffmpeg INTERFACE LINKER:--exclude-libs,ALL)
+ endif()
+ 
+diff --git a/cmake/Icu.cmake b/cmake/Icu.cmake
+index af06196..c004c2b 100644
+--- a/cmake/Icu.cmake
++++ b/cmake/Icu.cmake
+@@ -136,7 +136,7 @@ target_include_directories(icu_common SYSTEM PUBLIC ${ICU_SOURCE_DIR}/common)
+ target_compile_definitions(icu_common PUBLIC U_STATIC_IMPLEMENTATION PRIVATE U_COMMON_IMPLEMENTATION UCONFIG_NO_FILE_IO=1 UCONFIG_USE_WINDOWS_LCID_MAPPING_API=0)
+ target_compile_features(icu_common PUBLIC cxx_std_17)
+ set_target_properties(icu_common PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(icu_common INTERFACE LINKER:--exclude-libs,libicu_common.a)
+ endif()
+ 
+@@ -156,7 +156,7 @@ target_include_directories(icu_i18n SYSTEM PUBLIC ${ICU_SOURCE_DIR}/i18n)
+ target_compile_definitions(icu_i18n PRIVATE U_I18N_IMPLEMENTATION UCONFIG_NO_FILE_IO=1)
+ target_link_libraries(icu_i18n PUBLIC icu_common)
+ set_target_properties(icu_i18n PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(icu_i18n INTERFACE LINKER:--exclude-libs,libicu_i18n.a)
+ endif()
+ 
+diff --git a/cmake/LibPsl.cmake b/cmake/LibPsl.cmake
+index a3b761b..1cfc347 100644
+--- a/cmake/LibPsl.cmake
++++ b/cmake/LibPsl.cmake
+@@ -63,7 +63,7 @@ function(add_bundled_libpsl)
+         POSITION_INDEPENDENT_CODE ON
+         C_VISIBILITY_PRESET hidden
+     )
+-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(psl INTERFACE LINKER:--exclude-libs,libpsl.a)
+     endif()
+ endfunction()
+diff --git a/cmake/LibWpe.cmake b/cmake/LibWpe.cmake
+index 3b7a2bb..3d9529b 100644
+--- a/cmake/LibWpe.cmake
++++ b/cmake/LibWpe.cmake
+@@ -22,7 +22,7 @@ function(add_bundled_libwpe_key_unicode)
+         POSITION_INDEPENDENT_CODE ON
+         C_VISIBILITY_PRESET hidden
+     )
+-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(wpe_key_unicode INTERFACE LINKER:--exclude-libs,libwpe_key_unicode.a)
+     endif()
+ endfunction()
+diff --git a/cmake/LibXml2.cmake b/cmake/LibXml2.cmake
+index a3649f4..0ed3d21 100644
+--- a/cmake/LibXml2.cmake
++++ b/cmake/LibXml2.cmake
+@@ -61,7 +61,7 @@ function(add_bundled_libxml2)
+         C_VISIBILITY_PRESET hidden
+     )
+     target_compile_definitions(LibXml2 PUBLIC LIBXML_STATIC)
+-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(LibXml2 INTERFACE LINKER:--exclude-libs,libxml2.a)
+     endif()
+ endfunction()
+diff --git a/cmake/Opus.cmake b/cmake/Opus.cmake
+index 4556047..cd16933 100644
+--- a/cmake/Opus.cmake
++++ b/cmake/Opus.cmake
+@@ -18,7 +18,7 @@ function(add_bundled_opus)
+             target_compile_options(opus PRIVATE -Wa,-muse-unaligned-vector-move)
+         endif()
+     endif()
+-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(opus INTERFACE LINKER:--exclude-libs,libopus.a)
+     endif()
+ endfunction()
+diff --git a/cmake/ZArchive.cmake b/cmake/ZArchive.cmake
+index c4c7eb2..e3fdeb5 100644
+--- a/cmake/ZArchive.cmake
++++ b/cmake/ZArchive.cmake
+@@ -20,6 +20,6 @@ target_include_directories(zarchive SYSTEM PUBLIC ${ZARCHIVE_SOURCE_DIR}/include
+ target_compile_features(zarchive PUBLIC cxx_std_20)
+ target_link_libraries(zarchive PRIVATE libzstd_static)
+ set_target_properties(zarchive PROPERTIES POSITION_INDEPENDENT_CODE ON)
+-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(zarchive INTERFACE LINKER:--exclude-libs,libzarchive.a:libzstd.a)
+ endif()
+diff --git a/core/Decoder/Jpeg/CMakeLists.txt b/core/Decoder/Jpeg/CMakeLists.txt
+index 5d85601..3f42394 100644
+--- a/core/Decoder/Jpeg/CMakeLists.txt
++++ b/core/Decoder/Jpeg/CMakeLists.txt
+@@ -62,7 +62,7 @@ function(add_jpeg_decoder target runtimeTarget)
+             IMPORTED_LOCATION "${jpeg_turbo_library}"
+             INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/3rdparty/libjpeg-turbo/src;${jpeg_turbo_prefix}/include"
+         )
+-        if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++        if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+             target_link_options(jpeg_turbo INTERFACE "LINKER:--exclude-libs,$<TARGET_FILE_NAME:jpeg_turbo>")
+         endif()
+         add_dependencies(jpeg_turbo jpeg_turbo_external)
+diff --git a/core/Decoder/Png/CMakeLists.txt b/core/Decoder/Png/CMakeLists.txt
+index 6b4956c..ee8655a 100644
+--- a/core/Decoder/Png/CMakeLists.txt
++++ b/core/Decoder/Png/CMakeLists.txt
+@@ -9,7 +9,7 @@ function(add_png_decoder target runtimeTarget)
+     target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include)
+     target_include_directories(${target} SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/3rdparty/stb)
+     target_link_libraries(${target} PRIVATE ${runtimeTarget} zlibstatic)
+-    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(${target} INTERFACE "LINKER:--exclude-libs,$<TARGET_FILE_NAME:zlibstatic>")
+     endif()
+     set_target_properties(${target} PROPERTIES
+diff --git a/core/libs/CMakeLists.txt b/core/libs/CMakeLists.txt
+index cde0ae9..cf8ae6e 100644
+--- a/core/libs/CMakeLists.txt
++++ b/core/libs/CMakeLists.txt
+@@ -240,7 +240,7 @@ target_compile_options(fvad PRIVATE $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-fno
+ target_sources(libwebrtc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/prx/libwebrtc/Vad.cpp)
+ target_include_directories(libwebrtc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/libfvad/src)
+ target_link_libraries(libwebrtc PRIVATE fvad)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libwebrtc PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/CMakeLists.txt b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+index fe1eb65..1adcfaf 100644
+--- a/core/libs/prx/libSceAgcDriver/CMakeLists.txt
++++ b/core/libs/prx/libSceAgcDriver/CMakeLists.txt
+@@ -589,13 +589,20 @@ elseif(APS5_AGC_PROFILE STREQUAL "use")
+     endforeach()
+ endif()
+ target_include_directories(libSceAgcDriver SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/zstd/lib)
+-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceAgcDriver PRIVATE LINKER:--exclude-libs,libzstd.a)
+ endif()
+ if(APS5_ENABLE_TRACY)
+     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
+ endif()
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++# GuestMemory.cpp calls backtrace(): in glibc it is part of libc, on FreeBSD (and musl) it lives in libexecinfo.
++# Without it libSceAgcDriver.prx keeps backtrace unresolved: rtld aborts the process at the first call
++# (or refuses the library outright under LD_BIND_NOW).
++find_package(Backtrace)
++if(Backtrace_FOUND AND Backtrace_LIBRARIES)
++    target_link_libraries(libSceAgcDriver PRIVATE ${Backtrace_LIBRARIES})
++endif()
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceAgcDriver PRIVATE LINKER:--exclude-libs,$<TARGET_FILE_NAME:decoder_png>)
+ endif()
+ 
+diff --git a/core/libs/prx/libSceFreeType/CMakeLists.txt b/core/libs/prx/libSceFreeType/CMakeLists.txt
+index d3d2517..e6cfd1a 100644
+--- a/core/libs/prx/libSceFreeType/CMakeLists.txt
++++ b/core/libs/prx/libSceFreeType/CMakeLists.txt
+@@ -71,7 +71,7 @@ if(BUILD_TESTING)
+ endif()
+ 
+ target_sources(libSceFreeType PRIVATE src/List.cpp)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceFreeType PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libSceFreeType PRIVATE LINKER:-load_hidden,$<TARGET_FILE:freetype>)
+diff --git a/core/libs/prx/libSceFreeTypeOl/CMakeLists.txt b/core/libs/prx/libSceFreeTypeOl/CMakeLists.txt
+index d220f69..5849af2 100644
+--- a/core/libs/prx/libSceFreeTypeOl/CMakeLists.txt
++++ b/core/libs/prx/libSceFreeTypeOl/CMakeLists.txt
+@@ -9,7 +9,7 @@ target_link_libraries(libSceFreeTypeOl PRIVATE freetype)
+ if(ANYPS5_USE_SYSTEM_DEPS)
+     target_compile_definitions(libSceFreeTypeOl PRIVATE ANYPS5_FREETYPEOL_SYSTEM_DEPS)
+ endif()
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceFreeTypeOl PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libSceFreeTypeOl PRIVATE "LINKER:-exported_symbol,*_nid_*")
+diff --git a/core/libs/prx/libSceFreeTypeOt/CMakeLists.txt b/core/libs/prx/libSceFreeTypeOt/CMakeLists.txt
+index 51e0042..fc210ff 100644
+--- a/core/libs/prx/libSceFreeTypeOt/CMakeLists.txt
++++ b/core/libs/prx/libSceFreeTypeOt/CMakeLists.txt
+@@ -4,7 +4,7 @@ add_library(libSceFreeTypeOt SHARED EXCLUDE_FROM_ALL Export.cpp ../libSceFreeTyp
+ target_include_directories(libSceFreeTypeOt PRIVATE ${LIBS_INCLUDE_DIR})
+ include("${CMAKE_CURRENT_LIST_DIR}/Stream.cmake")
+ target_link_libraries(libSceFreeTypeOt PRIVATE freetype)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceFreeTypeOt PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libSceFreeTypeOt PRIVATE "LINKER:-exported_symbol,*_nid_*")
+diff --git a/core/libs/prx/libSceHttp2/CMakeLists.txt b/core/libs/prx/libSceHttp2/CMakeLists.txt
+index c919565..e7269d7 100644
+--- a/core/libs/prx/libSceHttp2/CMakeLists.txt
++++ b/core/libs/prx/libSceHttp2/CMakeLists.txt
+@@ -17,7 +17,7 @@ foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+     endif()
+ endforeach()
+ set_target_properties(nghttp2_static PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(nghttp2_static INTERFACE LINKER:--exclude-libs,libnghttp2.a)
+ endif()
+ install(FILES ${CMAKE_SOURCE_DIR}/3rdparty/nghttp2/COPYING DESTINATION licenses/nghttp2)
+@@ -29,7 +29,7 @@ add_library(anyps5_http2_transport STATIC EXCLUDE_FROM_ALL Transport.cpp
+ target_include_directories(anyps5_http2_transport PRIVATE ${LIBS_INCLUDE_DIR} ${http2ZlibDir})
+ target_link_libraries(anyps5_http2_transport PRIVATE libSceHttp libSceNet libSceSsl libkernel libkernel_sys libc nghttp2_static)
+ set_target_properties(anyps5_http2_transport PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden C_VISIBILITY_PRESET hidden)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(anyps5_http2_transport INTERFACE LINKER:--exclude-libs,libanyps5_http2_transport.a)
+ endif()
+ add_library(libSceHttp2 SHARED EXCLUDE_FROM_ALL Export.cpp Cookies.cpp InventoryExports.cpp)
+diff --git a/core/libs/prx/libSceLibreSsl/Cmac.cmake b/core/libs/prx/libSceLibreSsl/Cmac.cmake
+index df31044..a7c53f4 100644
+--- a/core/libs/prx/libSceLibreSsl/Cmac.cmake
++++ b/core/libs/prx/libSceLibreSsl/Cmac.cmake
+@@ -1,6 +1,6 @@
+ target_sources(libSceLibreSsl PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/Cmac.cpp)
+ target_link_libraries(libSceLibreSsl PRIVATE mbedcrypto)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceLibreSsl PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ 
+diff --git a/core/libs/prx/libSceLibreSsl3/CMakeLists.txt b/core/libs/prx/libSceLibreSsl3/CMakeLists.txt
+index 3a36cea..0ba7ed3 100644
+--- a/core/libs/prx/libSceLibreSsl3/CMakeLists.txt
++++ b/core/libs/prx/libSceLibreSsl3/CMakeLists.txt
+@@ -46,7 +46,7 @@ target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/X509CmpTi
+ target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/AesCcm.cpp)
+ target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/ChaCha.cpp)
+ target_link_libraries(libSceLibreSsl3 PRIVATE mbedcrypto)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceLibreSsl3 PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/X509VerifyParam.cpp)
+diff --git a/core/libs/prx/libSceNKWebKit/CMakeLists.txt b/core/libs/prx/libSceNKWebKit/CMakeLists.txt
+index a18ae2b..421e347 100644
+--- a/core/libs/prx/libSceNKWebKit/CMakeLists.txt
++++ b/core/libs/prx/libSceNKWebKit/CMakeLists.txt
+@@ -12,7 +12,7 @@ foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+     endif()
+ endforeach()
+ set_target_properties(qjs PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(qjs INTERFACE LINKER:--exclude-libs,libqjs.a)
+ endif()
+ install(FILES ${CMAKE_SOURCE_DIR}/3rdparty/quickjs/LICENSE DESTINATION licenses/quickjs)
+diff --git a/core/libs/prx/libSceNKWebKitRequirements/CMakeLists.txt b/core/libs/prx/libSceNKWebKitRequirements/CMakeLists.txt
+index b5fd114..96075e4 100644
+--- a/core/libs/prx/libSceNKWebKitRequirements/CMakeLists.txt
++++ b/core/libs/prx/libSceNKWebKitRequirements/CMakeLists.txt
+@@ -15,7 +15,7 @@ target_include_directories(libSceNKWebKitRequirements PRIVATE ${LIBS_INCLUDE_DIR
+ set_target_properties(libSceNKWebKitRequirements PROPERTIES CXX_EXTENSIONS OFF)
+ configure_windows_unwind(libSceNKWebKitRequirements)
+ target_link_libraries(libSceNKWebKitRequirements PRIVATE sqlite3 zlibstatic jpeg_turbo LibXml2 psl wpe_key_unicode)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceNKWebKitRequirements PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ 
+diff --git a/core/libs/prx/libSceNgs2.native/Ngs2Library.cmake b/core/libs/prx/libSceNgs2.native/Ngs2Library.cmake
+index a430591..52d3954 100644
+--- a/core/libs/prx/libSceNgs2.native/Ngs2Library.cmake
++++ b/core/libs/prx/libSceNgs2.native/Ngs2Library.cmake
+@@ -29,7 +29,7 @@ function(add_sce_ngs2_library target)
+         "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>;$<$<CXX_COMPILER_ID:MSVC>:/fp:strict>")
+     target_include_directories(${target} PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src ${CMAKE_SOURCE_DIR}/3rdparty/vgmstream/src)
+     target_link_libraries(${target} PRIVATE atrac9 vgmstream_hevag libc libkernel)
+-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         target_link_options(${target} PRIVATE LINKER:--exclude-libs,ALL)
+     endif()
+     set_target_properties(${target} PROPERTIES
+diff --git a/core/libs/prx/libScePngDec/CMakeLists.txt b/core/libs/prx/libScePngDec/CMakeLists.txt
+index 0c1fa5b..efb0250 100644
+--- a/core/libs/prx/libScePngDec/CMakeLists.txt
++++ b/core/libs/prx/libScePngDec/CMakeLists.txt
+@@ -6,7 +6,7 @@ target_include_directories(libScePngDec PRIVATE ${LIBS_INCLUDE_DIR})
+ set_target_properties(libScePngDec PROPERTIES CXX_EXTENSIONS OFF)
+ configure_windows_unwind(libScePngDec)
+ target_link_libraries(libScePngDec PRIVATE decoder_png png_backend)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libScePngDec PRIVATE "LINKER:--exclude-libs,$<TARGET_FILE_NAME:png_backend>")
+ endif()
+ 
+diff --git a/core/libs/prx/libSceSsl/CMakeLists.txt b/core/libs/prx/libSceSsl/CMakeLists.txt
+index 48c01f5..edd99b4 100644
+--- a/core/libs/prx/libSceSsl/CMakeLists.txt
++++ b/core/libs/prx/libSceSsl/CMakeLists.txt
+@@ -58,7 +58,7 @@ add_library(libSceSsl SHARED EXCLUDE_FROM_ALL Export.cpp)
+ target_include_directories(libSceSsl PRIVATE ${LIBS_INCLUDE_DIR})
+ target_link_libraries(libSceSsl PRIVATE mbedtls mbedx509 mbedcrypto)
+ set_target_properties(libSceSsl PROPERTIES VISIBILITY_INLINES_HIDDEN ON)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceSsl PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     set_target_properties(mbedtls mbedcrypto mbedx509 p256m PROPERTIES C_VISIBILITY_PRESET hidden)
+diff --git a/core/libs/prx/libSceUsbd/CMakeLists.txt b/core/libs/prx/libSceUsbd/CMakeLists.txt
+index f29c2d4..2d23fb1 100644
+--- a/core/libs/prx/libSceUsbd/CMakeLists.txt
++++ b/core/libs/prx/libSceUsbd/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ add_library(libSceUsbd SHARED EXCLUDE_FROM_ALL Export.cpp ../libkernel/Time/TimedWait.cpp)
+ target_include_directories(libSceUsbd PRIVATE ${LIBS_INCLUDE_DIR})
+ target_link_libraries(libSceUsbd PRIVATE usb-1.0)
+-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceUsbd PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ configure_windows_unwind(libSceUsbd)
+diff --git a/core/libs/prx/libSceVorbisDec/CMakeLists.txt b/core/libs/prx/libSceVorbisDec/CMakeLists.txt
+index 94b593f..fd5965b 100644
+--- a/core/libs/prx/libSceVorbisDec/CMakeLists.txt
++++ b/core/libs/prx/libSceVorbisDec/CMakeLists.txt
+@@ -64,7 +64,7 @@ add_library(libSceVorbisDec SHARED EXCLUDE_FROM_ALL Export.cpp)
+ target_include_directories(libSceVorbisDec PRIVATE ${LIBS_INCLUDE_DIR})
+ target_compile_definitions(libSceVorbisDec PRIVATE OV_EXCLUDE_STATIC_CALLBACKS)
+ target_link_libraries(libSceVorbisDec PRIVATE vorbisfile vorbis ogg)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libSceVorbisDec PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ configure_windows_unwind(libSceVorbisDec)
+diff --git a/core/libs/prx/libcairo/CMakeLists.txt b/core/libs/prx/libcairo/CMakeLists.txt
+index 5aa2ab4..63c9b25 100644
+--- a/core/libs/prx/libcairo/CMakeLists.txt
++++ b/core/libs/prx/libcairo/CMakeLists.txt
+@@ -8,7 +8,7 @@ configure_windows_unwind(libcairo)
+ target_sources(libcairo PRIVATE SurfacePattern.cpp)
+ target_sources(libcairo PRIVATE GlyphDrawing.cpp)
+ target_sources(libcairo PRIVATE ContextFontOptions.cpp)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libcairo PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libcairo PRIVATE
+diff --git a/core/libs/prx/libcurl/CMakeLists.txt b/core/libs/prx/libcurl/CMakeLists.txt
+index 492c938..fec34a7 100644
+--- a/core/libs/prx/libcurl/CMakeLists.txt
++++ b/core/libs/prx/libcurl/CMakeLists.txt
+@@ -94,7 +94,7 @@ if(WIN32)
+ endif()
+ target_include_directories(libcurl PUBLIC ${curlSourceDir}/include PRIVATE ${LIBS_INCLUDE_DIR})
+ target_link_libraries(libcurl PRIVATE libc libkernel anyps5_curl_backend)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libcurl PRIVATE LINKER:--exclude-libs,ALL)
+ endif()
+ configure_windows_unwind(libcurl)
+diff --git a/core/libs/prx/libfreetype/CMakeLists.txt b/core/libs/prx/libfreetype/CMakeLists.txt
+index 3d9d7e7..c7368cf 100644
+--- a/core/libs/prx/libfreetype/CMakeLists.txt
++++ b/core/libs/prx/libfreetype/CMakeLists.txt
+@@ -5,7 +5,7 @@ if(NOT ANYPS5_USE_SYSTEM_DEPS)
+     target_compile_definitions(libfreetype PRIVATE ANYPS5_BUNDLED_FREETYPE=1)
+ endif()
+ configure_windows_unwind(libfreetype)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libfreetype PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libfreetype PRIVATE "LINKER:-exported_symbol,*_nid_*")
+diff --git a/core/libs/prx/libharfbuzz/CMakeLists.txt b/core/libs/prx/libharfbuzz/CMakeLists.txt
+index d2aaeda..0aebafe 100644
+--- a/core/libs/prx/libharfbuzz/CMakeLists.txt
++++ b/core/libs/prx/libharfbuzz/CMakeLists.txt
+@@ -20,7 +20,7 @@ target_include_directories(libharfbuzz PUBLIC ${LIBS_INCLUDE_DIR})
+ target_link_libraries(libharfbuzz PRIVATE harfbuzz_backend freetype icu_common)
+ target_sources(libharfbuzz PRIVATE Lifecycle.cpp)
+ configure_windows_unwind(libharfbuzz)
+-if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
++if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     target_link_options(libharfbuzz PRIVATE LINKER:--exclude-libs,ALL)
+ elseif(APPLE)
+     target_link_options(libharfbuzz PRIVATE "LINKER:-exported_symbol,*_nid_*")

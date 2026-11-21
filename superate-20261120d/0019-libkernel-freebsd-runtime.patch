@@ -1,0 +1,706 @@
+diff --git a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+index dc8e735..a9c1620 100644
+--- a/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+@@ -1601,6 +1601,15 @@ int DoMprotect(const void* addr, size_t len, int prot, bool requireMappedStart)
+         const int error = GuestWriteWatch::GuestWriteWatchProtect_nid_postfix(insidePointer, insideBytes, nativeProtection);
+         if (error != 0) errno = error;
+         const bool protectedPages = error == 0;
++#elif defined(__FreeBSD__)
++        // The protection write watch has to see every change, as on macOS; ENOMEM still means stack pages not yet mapped.
++        int error = GuestWriteWatch::GuestWriteWatchProtect_nid_postfix(insidePointer, insideBytes, nativeProtection);
++        if (error == ENOMEM) {
++            MapUnmappedPages(insidePointer, static_cast<std::size_t>((stackEnd & ~hostPageMask) - inside));
++            error = GuestWriteWatch::GuestWriteWatchProtect_nid_postfix(insidePointer, insideBytes, nativeProtection);
++        }
++        if (error != 0) errno = error;
++        const bool protectedPages = error == 0;
+ #else
+         bool protectedPages = mprotect(insidePointer, insideBytes, nativeProtection) == 0;
+ #if defined(__linux__) || defined(__FreeBSD__)
+@@ -1647,7 +1656,7 @@ int DoMprotect(const void* addr, size_t len, int prot, bool requireMappedStart)
+     for (const auto& [span, spanBytes] : spans) mutation.RequireUnpinned(span, spanBytes);
+     for (const auto& [span, spanBytes] : spans) {
+         mutation.Protect(span, spanBytes, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0, (prot & GuestProtGpuWrite) != 0, [&] {
+-#ifdef __APPLE__
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+             if (const int error = GuestWriteWatch::GuestWriteWatchProtect_nid_postfix(const_cast<void*>(span), spanBytes, nativeProtection); error != 0)
+                 throw std::system_error(error, std::generic_category(), "mprotect failed");
+ #else
+diff --git a/core/libs/prx/libkernel/DirectMemory/Export.cpp b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+index 7eea896..538c1d3 100644
+--- a/core/libs/prx/libkernel/DirectMemory/Export.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/Export.cpp
+@@ -27,6 +27,8 @@
+ #ifdef __APPLE__
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
++#elif defined(__FreeBSD__)
++#include "prx/libc/include/specifics/linux/HostMapping.hpp"
+ #endif
+ #endif
+ #include <algorithm>
+@@ -521,6 +523,26 @@ static int QueryVirtualRange(const void* addr, int flags, VirtualQueryInfo* info
+  }
+  const bool writable = watched >= 0 ? (watched & PROT_WRITE) != 0 : (host.protection & VM_PROT_WRITE) != 0;
+  const bool executable = (host.protection & VM_PROT_EXECUTE) != 0;
++ #elif defined(__FreeBSD__)
++ // No /proc/self/maps: the host mapping from kern.proc.vmmap, and the write watch's protection where it watches.
++ const auto host = HostMapping::Find(address, "sceKernelVirtualQuery");
++ if (!host || !host->readable) return SCE_KERNEL_ERROR_EACCES;
++ info->start = host->start;
++ info->end = host->end;
++ int watched = -1;
++ for (std::uintptr_t cursor = info->start; cursor < info->end;) {
++  std::uintptr_t runEnd = info->end;
++  const int protection = GuestWriteWatch::GuestWriteWatchProtection_nid_postfix(cursor, info->end, &runEnd);
++  if (address < runEnd) {
++   info->start = cursor;
++   info->end = runEnd;
++   watched = protection;
++   break;
++  }
++  cursor = runEnd;
++ }
++ const bool writable = watched >= 0 ? (watched & PROT_WRITE) != 0 : host->writable;
++ const bool executable = host->executable;
+  #else
+  std::ifstream maps("/proc/self/maps");
+  std::string line;
+diff --git a/core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp b/core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp
+index 71ea95c..d151d71 100644
+--- a/core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp
++++ b/core/libs/prx/libkernel/DirectMemory/PosixMemory.cpp
+@@ -15,7 +15,7 @@
+ #include <new>
+ #include <stdexcept>
+ #include <system_error>
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+@@ -52,7 +52,7 @@ constexpr std::uintptr_t GuestUserAddressEnd = 0x800000000000;
+ constexpr int GuestAlignedSuper = 0x1000000;
+ constexpr std::size_t SuperpageSize = std::size_t{1} << 21;
+ 
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+ class ScopedDescriptor {
+ public:
+     explicit ScopedDescriptor(int value) noexcept : descriptor(fcntl(value, F_DUPFD_CLOEXEC, 0)), error(descriptor < 0 ? errno : 0) {}
+@@ -194,7 +194,7 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
+         rounded > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
+         static_cast<std::uint64_t>(offset) > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) - rounded)
+         return failed(GuestInvalid);
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+     const ScopedDescriptor pinnedDescriptor(descriptor);
+     if (pinnedDescriptor.Get() < 0) return failed(pinnedDescriptor.Error());
+     const int mappingDescriptor = pinnedDescriptor.Get();
+diff --git a/core/libs/prx/libkernel/Equeue/src/EdgeWatch.cpp b/core/libs/prx/libkernel/Equeue/src/EdgeWatch.cpp
+index 77e3ebb..ca8d28d 100644
+--- a/core/libs/prx/libkernel/Equeue/src/EdgeWatch.cpp
++++ b/core/libs/prx/libkernel/Equeue/src/EdgeWatch.cpp
+@@ -9,7 +9,7 @@
+ #ifdef __linux__
+ #include <sys/epoll.h>
+ #include <unistd.h>
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue
+ #include <fcntl.h>
+ #include <sys/event.h>
+ #include <unistd.h>
+@@ -46,7 +46,7 @@ bool Watch::TakeEdge() {
+     return ::epoll_wait(m_descriptor, &ready, 1, 0) > 0;
+ }
+ 
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue
+ 
+ std::shared_ptr<Watch> Watch::Open(std::intptr_t hostDescriptor, std::intptr_t, bool write) {
+     auto watch = std::make_shared<Watch>(-1);
+diff --git a/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp b/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
+index 5add812..24b412d 100644
+--- a/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
++++ b/core/libs/prx/libkernel/Equeue/src/FileEvent.cpp
+@@ -33,6 +33,11 @@
+ #include <poll.h>
+ #include <sys/eventfd.h>
+ #include <sys/inotify.h>
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/event.h>
++#include <sys/user.h> // struct kinfo_file for F_KINFO
++#endif
+ #include <sys/stat.h>
+ #include <unistd.h>
+ #include <unordered_map>
+@@ -42,7 +47,7 @@ namespace {
+ 
+ constexpr int GUEST_EBADF = 9;
+ constexpr int GUEST_EINVAL = 22;
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__) // the system NOTE_* values are the guest's
+ static_assert(NOTE_DELETE == 0x0001 && NOTE_WRITE == 0x0002 && NOTE_EXTEND == 0x0004 && NOTE_ATTRIB == 0x0008 &&
+     NOTE_LINK == 0x0010 && NOTE_RENAME == 0x0020);
+ #else
+@@ -670,7 +675,16 @@ int OpenHostWatch(int descriptor, std::uint32_t, HostWatch& host) {
+         NotImplemented_nid_no_patch("EVFILT_VNODE: a descriptor that is not a file or a directory");
+     }
+     host.directory = S_ISDIR(status.st_mode);
++#if defined(__FreeBSD__)
++    // No /proc/self/fd: F_KINFO gives the path the descriptor was opened with (inotify watches by path).
++    struct kinfo_file info {};
++    info.kf_structsize = KINFO_FILE_SIZE;
++    if (::fcntl(descriptor, F_KINFO, &info) != 0 || info.kf_path[0] == '\0')
++        throw std::runtime_error("EVFILT_VNODE: the path of the watched descriptor is unknown, errno=" + std::to_string(errno));
++    const std::string path = info.kf_path;
++#else
+     const auto path = "/proc/self/fd/" + std::to_string(descriptor);
++#endif
+     host.target = ::open(path.c_str(), O_PATH | O_CLOEXEC);
+     if (host.target < 0 || ::fstat(host.target, &host.last) != 0) {
+         const int error = errno;
+diff --git a/core/libs/prx/libkernel/File/src/DescriptorControl.cpp b/core/libs/prx/libkernel/File/src/DescriptorControl.cpp
+index 307159b..ce9a5ee 100644
+--- a/core/libs/prx/libkernel/File/src/DescriptorControl.cpp
++++ b/core/libs/prx/libkernel/File/src/DescriptorControl.cpp
+@@ -318,7 +318,7 @@ std::optional<Kind> Classify(int fd, const char* function) {
+     if (S_ISFIFO(status.st_mode)) return Kind::Pipe;
+     if (S_ISCHR(status.st_mode)) return Kind::Device;
+     if (S_ISSOCK(status.st_mode)) return Kind::Socket;
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__) // both have descriptors that are none of these (eventfd, kqueue, ...)
+     return std::nullopt;
+ #else
+     throw std::runtime_error(std::string(function) + ": descriptor " + std::to_string(fd) + " is neither a file, a directory, a pipe, a socket nor a character device");
+diff --git a/core/libs/prx/libkernel/File/src/DirectoryDescriptor.cpp b/core/libs/prx/libkernel/File/src/DirectoryDescriptor.cpp
+index f37fe58..31a2166 100644
+--- a/core/libs/prx/libkernel/File/src/DirectoryDescriptor.cpp
++++ b/core/libs/prx/libkernel/File/src/DirectoryDescriptor.cpp
+@@ -34,6 +34,9 @@
+ #include <unistd.h>
+ #ifdef __APPLE__
+ #include <sys/param.h>
++#elif defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/user.h> // struct kinfo_file for F_KINFO
+ #endif
+ #endif
+ 
+@@ -58,6 +61,19 @@ std::filesystem::path HostDescriptorTarget(int fd, std::error_code& error) {
+         return {};
+     }
+     return std::filesystem::path(buffer);
++#elif defined(__FreeBSD__)
++    // No /proc/self/fd: F_KINFO reports the path the descriptor was opened with (kf_path, empty if unknown).
++    struct kinfo_file info {};
++    info.kf_structsize = KINFO_FILE_SIZE;
++    if (::fcntl(fd, F_KINFO, &info) != 0) {
++        error = std::error_code(errno, std::generic_category());
++        return {};
++    }
++    if (info.kf_path[0] == '\0') {
++        error = std::make_error_code(std::errc::no_such_file_or_directory);
++        return {};
++    }
++    return std::filesystem::path(info.kf_path);
+ #else
+     return std::filesystem::read_symlink(std::filesystem::path("/proc/self/fd") / std::to_string(fd), error);
+ #endif
+diff --git a/core/libs/prx/libkernel/File/src/OpenFileLimit.cpp b/core/libs/prx/libkernel/File/src/OpenFileLimit.cpp
+index a5af366..23c9c41 100644
+--- a/core/libs/prx/libkernel/File/src/OpenFileLimit.cpp
++++ b/core/libs/prx/libkernel/File/src/OpenFileLimit.cpp
+@@ -1,9 +1,9 @@
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+ 
+ #include <cerrno>
+ #include <system_error>
+ #include <sys/resource.h>
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #endif
+ 
+@@ -14,7 +14,7 @@ struct OpenFileLimit {
+         rlimit limit{};
+         if (getrlimit(RLIMIT_NOFILE, &limit) != 0) throw std::system_error(errno, std::generic_category(), "read open file limit");
+         rlim_t usable = limit.rlim_max;
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+         int perProcess = 0;
+         std::size_t size = sizeof(perProcess);
+         if (sysctlbyname("kern.maxfilesperproc", &perProcess, &size, nullptr, 0) != 0) throw std::system_error(errno, std::generic_category(), "read kern.maxfilesperproc");
+diff --git a/core/libs/prx/libkernel/File/src/Stdio.cpp b/core/libs/prx/libkernel/File/src/Stdio.cpp
+index 1768310..5a44140 100644
+--- a/core/libs/prx/libkernel/File/src/Stdio.cpp
++++ b/core/libs/prx/libkernel/File/src/Stdio.cpp
+@@ -1732,6 +1732,9 @@ static int CopyIovecs(const KernelIovec* iov, int iovcnt, std::vector<KernelIove
+     if (copied < 0 && errno != EFAULT) throw std::runtime_error("iovec: process_vm_readv failed with errno " + std::to_string(errno));
+     errno = saved;
+     if (copied < 0 || static_cast<std::size_t>(copied) != bytes) return SceErrorFromErrno(GUEST_EFAULT);
++#elif defined(__FreeBSD__)
++    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
++    if (!GuestCopyInUnsynced_nid_no_patch(vectors.data(), iov, bytes)) return SceErrorFromErrno(GUEST_EFAULT);
+ #elif defined(__APPLE__)
+     mach_vm_size_t copied = 0;
+     if (::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(iov), bytes,
+diff --git a/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp b/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
+index 0dedbee..3edc80d 100644
+--- a/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
++++ b/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
+@@ -32,7 +32,7 @@
+ #include <mach-o/loader.h>
+ #else
+ #include <link.h>
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ #include <unistd.h>
+ #endif
+ #endif
+@@ -228,7 +228,7 @@ char* APS5_VABI dlerror_nid_postfix() {
+     pendingError = false;
+     return LoaderError().data();
+ }
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ static void InitializeLinuxGuestModule(void* native) {
+     auto* table = static_cast<std::uint64_t*>(::dlsym(native, "__aps5_guest_lifecycle_nid_no_patch"));
+     if (!table) return;
+@@ -506,7 +506,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
+             return nullptr;
+         }
+         module->owned = path != nullptr;
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+         if (path) InitializeLinuxGuestModule(module->native);
+ #endif
+ #ifdef __APPLE__
+diff --git a/core/libs/prx/libkernel/Module/src/Module.cpp b/core/libs/prx/libkernel/Module/src/Module.cpp
+index d5e659a..47b3bcf 100644
+--- a/core/libs/prx/libkernel/Module/src/Module.cpp
++++ b/core/libs/prx/libkernel/Module/src/Module.cpp
+@@ -11,6 +11,7 @@
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
++#include "prx/libc/include/specifics/linux/MainProgram.hpp"
+ #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/Module/EhFrame.hpp"
+@@ -130,7 +131,7 @@ int FindRelinkedImage(dl_phdr_info* image, std::size_t, void* data) {
+   }
+   if (!contains) return 0;
+   const std::string_view name = image->dlpi_name != nullptr ? image->dlpi_name : "";
+-  search.relinked = name.empty() || name.ends_with(".guest.prx");
++  search.relinked = MainProgramImage(*image) || name.ends_with(".guest.prx");
+   return 1;
+ }
+ 
+diff --git a/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp b/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
+index f777763..80183b3 100644
+--- a/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
++++ b/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
+@@ -13,6 +13,7 @@
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/specifics/freebsd/Compat.hpp"
++#include "prx/libc/include/specifics/linux/MainProgram.hpp"
+ #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/Module/EhFrame.hpp"
+@@ -326,7 +327,7 @@ int FindImage(dl_phdr_info* image, std::size_t, void* data) {
+ 
+ int CollectGuestImage(dl_phdr_info* image, std::size_t, void* data) {
+     const std::string_view name = image->dlpi_name ? image->dlpi_name : "";
+-    if (!name.empty() && !name.ends_with(".prx")) return 0;
++    if (!MainProgramImage(*image) && !name.ends_with(".prx")) return 0;
+     for (std::uint16_t i = 0; i < image->dlpi_phnum; ++i) {
+         const auto& header = image->dlpi_phdr[i];
+         if (header.p_type != PT_LOAD) continue;
+@@ -352,7 +353,7 @@ std::vector<GuestImage> GuestImages() {
+ 
+ int AddGuestSegmentBytes(dl_phdr_info* image, std::size_t, void* data) {
+     const std::string_view name = image->dlpi_name ? image->dlpi_name : "";
+-    if (!name.empty() && !name.ends_with(GuestModuleSuffix)) return 0;
++    if (!MainProgramImage(*image) && !name.ends_with(GuestModuleSuffix)) return 0;
+     constexpr auto allAccess = PF_R | PF_W | PF_X;
+     for (std::uint16_t i = 0; i < image->dlpi_phnum; ++i) {
+         const auto& header = image->dlpi_phdr[i];
+@@ -369,9 +370,9 @@ std::uint64_t GuestSegmentBytes() {
+ }
+ 
+ bool SystemImage(const GuestImage& image) {
+-    const auto* name = static_cast<const link_map*>(image.native)->l_name;
+-    const std::string_view path = name ? name : "";
+-    return !path.empty() && !path.ends_with(GuestModuleSuffix);
++    const auto* map = static_cast<const link_map*>(image.native);
++    const std::string_view path = map->l_name ? map->l_name : "";
++    return !MainProgramMap(*map) && !path.ends_with(GuestModuleSuffix);
+ }
+ #else
+ bool SectionNamed(const IMAGE_SECTION_HEADER& section, const char* name) {
+diff --git a/core/libs/prx/libkernel/Module/src/Tls.cpp b/core/libs/prx/libkernel/Module/src/Tls.cpp
+index bc3f812..6d1a603 100644
+--- a/core/libs/prx/libkernel/Module/src/Tls.cpp
++++ b/core/libs/prx/libkernel/Module/src/Tls.cpp
+@@ -19,7 +19,7 @@ constexpr std::size_t ThreadLocalStoragePointerOffset = 0x58;
+ 
+ }
+ 
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ extern "C" void* __tls_get_addr(void* index);
+ #endif
+ 
+@@ -32,7 +32,8 @@ void* APS5_VABI __tls_get_addr_nid_postfix(const KernelTlsIndex* index) {
+     auto* blocks = *reinterpret_cast<char***>(reinterpret_cast<char*>(NtCurrentTeb()) + ThreadLocalStoragePointerOffset);
+     if (blocks == nullptr || blocks[slot] == nullptr) throw std::logic_error("__tls_get_addr: thread has no TLS block for the module");
+     return blocks[slot] + index->offset;
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
++    // FreeBSD's rtld exports __tls_get_addr with the same {module, offset} index.
+     KernelTlsIndex host = *index;
+     return __tls_get_addr(&host);
+ #else
+diff --git a/core/libs/prx/libkernel/Socket/src/Udp.cpp b/core/libs/prx/libkernel/Socket/src/Udp.cpp
+index 3cc5329..1b2745f 100644
+--- a/core/libs/prx/libkernel/Socket/src/Udp.cpp
++++ b/core/libs/prx/libkernel/Socket/src/Udp.cpp
+@@ -66,10 +66,13 @@
+ #include <stdexcept>
+ #include <string>
+ #include <vector>
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <sys/event.h>
+ #include <sys/param.h>
+ #endif
++#ifdef __FreeBSD__
++#include <sys/filio.h> // FIONWRITE
++#endif
+ 
+ namespace {
+ #ifdef _WIN32
+@@ -1279,6 +1282,9 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
+ #ifdef __linux__
+         int queued = 0;
+         if (*data > 0 && ::ioctl(socket->value, SIOCOUTQ, &queued) == 0) *data = std::max<std::int64_t>(0, *data - queued);
++#elif defined(__FreeBSD__)
++        int queued = 0;
++        if (*data > 0 && ::ioctl(socket->value, FIONWRITE, &queued) == 0) *data = std::max<std::int64_t>(0, *data - queued);
+ #endif
+     } else if (Listening(*socket)) {
+         *data = ListenQueueLength(socket->value);
+@@ -1331,12 +1337,14 @@ bool GuestSockets::PipeWriteState(int descriptor, std::int64_t* data, bool* eof,
+     *eof = (entry.revents & POLLERR) != 0;
+     *writable = (entry.revents & POLLOUT) != 0;
+     *data = *eof ? 0 : std::max<std::int64_t>(0, capacity - queued);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__FreeBSD__) // kqueue reports the room left in the pipe
+     if (!IsPipe(descriptor, 0) || (::fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_RDONLY) return false;
++#ifdef __APPLE__
+     char path[MAXPATHLEN];
+     if (::fcntl(descriptor, F_GETPATH, path) >= 0) NotImplemented_nid_no_patch(__func__);
+     if (errno != EBADF)
+         throw std::runtime_error("kevent: identifying pipe descriptor " + std::to_string(descriptor) + " failed, host errno " + std::to_string(errno));
++#endif
+     const int queue = ::kqueue();
+     if (queue < 0)
+         throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed, host errno " + std::to_string(errno));
+@@ -2500,6 +2508,9 @@ static bool ReadGuest(void* destination, const void* source, std::size_t bytes)
+     iovec remote{const_cast<void*>(source), bytes};
+     const int saved = errno;
+     return Transferred(::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0), bytes, "process_vm_readv", saved);
++#elif defined(__FreeBSD__)
++    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
++    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
+ #elif defined(__APPLE__)
+     mach_vm_size_t copied = 0;
+     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
+@@ -2524,6 +2535,9 @@ static bool WriteGuest(void* destination, const void* source, std::size_t bytes)
+     iovec remote{destination, bytes};
+     const int saved = errno;
+     return Transferred(::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0), bytes, "process_vm_writev", saved);
++#elif defined(__FreeBSD__)
++    // No process_vm_writev on FreeBSD: libc's checked copy.
++    return GuestCopyOut_nid_no_patch(destination, source, bytes);
+ #elif defined(__APPLE__)
+     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
+         reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
+diff --git a/core/libs/prx/libkernel/System/src/Exception.cpp b/core/libs/prx/libkernel/System/src/Exception.cpp
+index a7aec17..7927ff7 100644
+--- a/core/libs/prx/libkernel/System/src/Exception.cpp
++++ b/core/libs/prx/libkernel/System/src/Exception.cpp
+@@ -4,6 +4,9 @@
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/specifics/freebsd/Compat.hpp"
++#if defined(__linux__) || defined(__FreeBSD__)
++#include "prx/libc/include/specifics/linux/MainProgram.hpp"
++#endif
+ #include "prx/libc/include/GuestArena.hpp"
+ #include "prx/libc/include/GuestWriteWatch.hpp"
+ #include "prx/libc/include/HostFault.hpp"
+@@ -1247,6 +1250,16 @@ constexpr std::string_view GuestModuleSuffix = ".guest.prx";
+ 
+ std::array<struct sigaction, FaultSignals.size()> previousFaultActions{};
+ 
++// A signal another process (or raise) sent, as opposed to a fault: si_code <= 0 on Linux, SI_USER (0x10001) and
++// above on FreeBSD, whose faults carry small positive codes as Linux does.
++bool SentByProcess(const siginfo_t* info) {
++#ifdef __FreeBSD__
++    return info->si_code <= 0 || info->si_code >= SI_USER;
++#else
++    return info->si_code <= 0;
++#endif
++}
++
+ #ifdef __FreeBSD__
+ // FreeBSD numbers traps its own way (x86/trap.h): translate mc_trapno to the x86 vector Classify speaks.
+ // mc_addr is the faulting address (CR2) of a page fault, mc_err the hardware error code.
+@@ -1322,7 +1335,7 @@ bool GuestCode(std::uintptr_t rip) {
+ #endif
+     if (!native) return false;
+     const std::string_view name = native->l_name ? native->l_name : "";
+-    return name.empty() || name.ends_with(GuestModuleSuffix);
++    return MainProgramMap(*native) || name.ends_with(GuestModuleSuffix);
+ }
+ 
+ void ChainFault(int hostSignal, siginfo_t* info, void* context) {
+@@ -1337,16 +1350,16 @@ void ChainFault(int hostSignal, siginfo_t* info, void* context) {
+             previous.sa_handler(hostSignal);
+             return;
+         }
+-        if (info->si_code <= 0 && previous.sa_handler == SIG_IGN) return;
++        if (SentByProcess(info) && previous.sa_handler == SIG_IGN) return;
+     }
+     ::signal(hostSignal, SIG_DFL);
+-    if (info->si_code <= 0) ::raise(hostSignal);
++    if (SentByProcess(info)) ::raise(hostSignal);
+ }
+ 
+ void DeliverFault(int hostSignal, siginfo_t* info, void* context) {
+     auto& host = static_cast<ucontext_t*>(context)->uc_mcontext;
+     Fault fault{};
+-    const bool deliverable = info->si_code > 0 && Classify(hostSignal, host, fault);
++    const bool deliverable = !SentByProcess(info) && Classify(hostSignal, host, fault);
+     if (deliverable && fault.trap.number == TrapPage && GuestWriteWatch::GuestWriteWatchHandleFault_nid_postfix(fault.trap.address)) return;
+     const auto handler = deliverable ? Handler(fault.signum) : nullptr;
+     if (handler == nullptr || !GuestCode(static_cast<std::uintptr_t>(HostRip(host)))) {
+diff --git a/core/libs/prx/libkernel/System/src/Process.cpp b/core/libs/prx/libkernel/System/src/Process.cpp
+index f965874..075e9d3 100644
+--- a/core/libs/prx/libkernel/System/src/Process.cpp
++++ b/core/libs/prx/libkernel/System/src/Process.cpp
+@@ -23,6 +23,9 @@
+ #include <asm/prctl.h>
+ #include <sys/syscall.h>
+ #endif
++#if defined(__FreeBSD__) && defined(__x86_64__)
++#include <machine/sysarch.h>
++#endif
+ 
+ #ifdef _WIN32
+ #include "prx/libc/include/ChildProcesses.hpp"
+@@ -127,6 +130,9 @@ bool StoreGuestId(std::uint32_t* output) {
+     const auto copied = ::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0);
+     if (copied < 0 && errno == EFAULT) errno = saved;
+     return copied == static_cast<ssize_t>(sizeof(zero));
++#elif defined(__FreeBSD__)
++    // No process_vm_writev on FreeBSD: libc's checked copy.
++    return GuestCopyOut_nid_no_patch(output, &zero, sizeof(zero));
+ #elif defined(__APPLE__)
+     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(output),
+         reinterpret_cast<vm_offset_t>(const_cast<std::uint32_t*>(&zero)), sizeof(zero)) == KERN_SUCCESS;
+@@ -156,6 +162,9 @@ bool ReadGuest(void* destination, const void* source, std::size_t bytes) {
+     if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_readv failed with errno " + std::to_string(errno));
+     errno = saved;
+     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
++#elif defined(__FreeBSD__)
++    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
++    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
+ #elif defined(__APPLE__)
+     mach_vm_size_t copied = 0;
+     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
+@@ -181,6 +190,9 @@ bool WriteGuest(void* destination, const void* source, std::size_t bytes) {
+     if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_writev failed with errno " + std::to_string(errno));
+     errno = saved;
+     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
++#elif defined(__FreeBSD__)
++    // No process_vm_writev on FreeBSD: libc's checked copy.
++    return GuestCopyOut_nid_no_patch(destination, source, bytes);
+ #elif defined(__APPLE__)
+     return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
+         reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
+@@ -228,6 +240,8 @@ public:
+         char** values = *_NSGetArgv();
+         for (int index = 0; index < count; ++index)
+             arguments.push_back(values[index]);
++#elif defined(__FreeBSD__)
++        arguments = HostExecutable::Arguments("Reading process arguments");
+ #else
+         std::ifstream stream("/proc/self/cmdline", std::ios::binary);
+         if (!stream)
+@@ -869,13 +883,18 @@ int ExecProgram(const char* file, char* const* arguments, char* const* environme
+ #ifdef _WIN32
+     if (!ExecWindowsImage(target)) return fail(errnoNoExec);
+     ExecReplaceWindows(target, ExecArgumentVector(arguments), implicitEnvironment, entries);
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
++#if defined(__FreeBSD__)
++    constexpr unsigned char hostOsAbi = 9;   // ELFOSABI_FREEBSD, what relinker --freebsd writes
++#else
++    constexpr unsigned char hostOsAbi = 3;   // ELFOSABI_GNU
++#endif
+     const int descriptor = ::open(target.c_str(), O_RDONLY | O_CLOEXEC);
+     if (descriptor < 0) throw std::system_error(errno, std::generic_category(), "exec: opening the converted executable");
+     std::array<unsigned char, 20> header{};
+     if (::pread(descriptor, header.data(), header.size(), 0) != static_cast<ssize_t>(header.size()) || header[0] != 0x7f ||
+         header[1] != 'E' || header[2] != 'L' || header[3] != 'F' || header[4] != 2 || header[5] != 1 ||
+-        (header[7] != 0 && header[7] != 3) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 ||
++        (header[7] != 0 && header[7] != hostOsAbi) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 ||
+         header[19] != 0) {
+         ::close(descriptor);
+         return fail(errnoNoExec);
+@@ -1043,7 +1062,9 @@ static int IoPermission(int operation, void* parameters) {
+     return 0;
+ }
+ 
+-int APS5_VABI sysarch(int operation, void* parameters) {
++// _nid_postfix: FreeBSD's libc has its own sysarch(2), which a plain-named PS5 one would interpose for the whole
++// process wherever the libraries are loaded unpatched. nid_patcher strips the postfix, so the NID is unchanged.
++int APS5_VABI sysarch_nid_postfix(int operation, void* parameters) {
+     constexpr int i386GetLdt = 0;
+     constexpr int i386SetLdt = 1;
+     constexpr int i386GetIoperm = 3;
+@@ -1070,7 +1091,7 @@ int APS5_VABI sysarch(int operation, void* parameters) {
+     const bool i386 = operation == i386GetFsBase || operation == i386GetGsBase;
+     if (!i386 && operation != getFsBase && operation != getGsBase && operation != setGsBase && operation != i386SetGsBase)
+         NotImplemented_nid_no_patch(("sysarch: operation " + std::to_string(operation)).c_str());
+-#if (defined(__linux__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
++#if (defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32) || defined(__APPLE__)) && defined(__x86_64__)
+     if (parameters == nullptr) {
+         *__error_nid_postfix() = guestFault;
+         return -1;
+@@ -1090,6 +1111,9 @@ int APS5_VABI sysarch(int operation, void* parameters) {
+         }
+ #if defined(_WIN32) || defined(__APPLE__)
+         GuestGsSet_nid_no_patch(base);
++#elif defined(__FreeBSD__)
++        // FreeBSD's own sysarch(2): GS is free for user code, as on Linux (libthr keeps TLS in FS).
++        if (::amd64_set_gsbase(reinterpret_cast<void*>(base)) != 0) throw std::system_error(errno, std::generic_category(), "sysarch: setting the GS base");
+ #else
+         if (::syscall(SYS_arch_prctl, ARCH_SET_GS, base) != 0) throw std::system_error(errno, std::generic_category(), "sysarch: setting the GS base");
+ #endif
+@@ -1099,6 +1123,11 @@ int APS5_VABI sysarch(int operation, void* parameters) {
+ #if defined(_WIN32) || defined(__APPLE__)
+     if (fs) NotImplemented_nid_no_patch(("sysarch: operation " + std::to_string(operation)).c_str());
+     base = GuestGsGet_nid_no_patch();
++#elif defined(__FreeBSD__)
++    void* segment = nullptr;
++    if ((fs ? ::amd64_get_fsbase(&segment) : ::amd64_get_gsbase(&segment)) != 0)
++        throw std::system_error(errno, std::generic_category(), "sysarch: reading a segment base");
++    base = reinterpret_cast<std::uint64_t>(segment);
+ #else
+     if (::syscall(SYS_arch_prctl, fs ? ARCH_GET_FS : ARCH_GET_GS, &base) != 0)
+         throw std::system_error(errno, std::generic_category(), "sysarch: reading a segment base");
+diff --git a/core/libs/prx/libkernel/Time/Time.cpp b/core/libs/prx/libkernel/Time/Time.cpp
+index 3f27ae9..eadc156 100644
+--- a/core/libs/prx/libkernel/Time/Time.cpp
++++ b/core/libs/prx/libkernel/Time/Time.cpp
+@@ -45,6 +45,13 @@
+ #include <pthread.h>
+ #include <sched.h>
+ #include <sys/uio.h>
++#elif defined(__FreeBSD__)
++#include <dlfcn.h>
++#include <link.h>
++#include <pthread.h>
++#include <pthread_np.h>
++#include <sched.h>
++#include <sys/cpuset.h>
+ #elif defined(__APPLE__)
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
+@@ -75,6 +82,9 @@ static bool ReadGuestTime(void* destination, const void* source, std::size_t byt
+     if (copied < 0 && errno != EFAULT) throw std::runtime_error("time: process_vm_readv failed with errno " + std::to_string(errno));
+     errno = saved;
+     return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
++#elif defined(__FreeBSD__)
++    // No process_vm_readv on FreeBSD: libc's checked copy (the host read was prepared above).
++    return GuestCopyInUnsynced_nid_no_patch(destination, source, bytes);
+ #elif defined(__APPLE__)
+     mach_vm_size_t copied = 0;
+     return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
+@@ -217,10 +227,10 @@ public:
+     CurrentCpuPin() {
+ #ifdef _WIN32
+         previous = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << GetCurrentProcessorNumber());
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+         const int cpu = sched_getcpu();
+         if (cpu < 0 || cpu >= CPU_SETSIZE || pthread_getaffinity_np(pthread_self(), sizeof(previous), &previous) != 0) return;
+-        cpu_set_t one;
++        CpuMask one;
+         CPU_ZERO(&one);
+         CPU_SET(cpu, &one);
+         pinned = pthread_setaffinity_np(pthread_self(), sizeof(one), &one) == 0;
+@@ -230,7 +240,7 @@ public:
+     ~CurrentCpuPin() {
+ #ifdef _WIN32
+         if (previous != 0) SetThreadAffinityMask(GetCurrentThread(), previous);
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+         if (pinned) pthread_setaffinity_np(pthread_self(), sizeof(previous), &previous);
+ #endif
+     }
+@@ -241,8 +251,13 @@ public:
+ private:
+ #ifdef _WIN32
+     DWORD_PTR previous = 0;
+-#elif defined(__linux__)
+-    cpu_set_t previous{};
++#elif defined(__linux__) || defined(__FreeBSD__)
++#if defined(__FreeBSD__)
++    using CpuMask = cpuset_t;
++#else
++    using CpuMask = cpu_set_t;
++#endif
++    CpuMask previous{};
+     bool pinned = false;
+ #endif
+ };
+@@ -272,7 +287,7 @@ static std::string DescribeCallSite(const void* caller) {
+ #ifdef _WIN32
+     const auto image = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+     std::snprintf(text, sizeof(text), "exe+0x%llx", static_cast<unsigned long long>(address - image));
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+     Dl_info info{};
+     link_map* map = nullptr;
+     if (dladdr1(caller, &info, reinterpret_cast<void**>(&map), RTLD_DL_LINKMAP) == 0 || map == nullptr) {
+@@ -282,7 +297,7 @@ static std::string DescribeCallSite(const void* caller) {
+     const char* path = map->l_name;
+     const char* slash = path == nullptr ? nullptr : std::strrchr(path, '/');
+     const char* module = path == nullptr || *path == '\0' ? "exe" : slash == nullptr ? path : slash + 1;
+-    std::snprintf(text, sizeof(text), "%s+0x%llx", module, static_cast<unsigned long long>(address - map->l_addr));
++    std::snprintf(text, sizeof(text), "%s+0x%llx", module, static_cast<unsigned long long>(address - (std::uintptr_t)map->l_addr));
+ #else
+     std::snprintf(text, sizeof(text), "0x%llx", static_cast<unsigned long long>(address));
+ #endif
+diff --git a/core/libs/prx/libkernel/include/Api.hpp b/core/libs/prx/libkernel/include/Api.hpp
+index c839978..9499a0d 100644
+--- a/core/libs/prx/libkernel/include/Api.hpp
++++ b/core/libs/prx/libkernel/include/Api.hpp
+@@ -711,7 +711,7 @@ int APS5_VABI sched_getparam_nid_postfix(int pid, KernelSchedParam* param);
+ int APS5_VABI sched_getscheduler_nid_postfix(int pid);
+ int APS5_VABI sched_setparam_nid_postfix(int pid, const KernelSchedParam* param);
+ int APS5_VABI sched_get_priority_min_nid_postfix(int policy);
+-int APS5_VABI sysarch(int operation, void* parameters);
++int APS5_VABI sysarch_nid_postfix(int operation, void* parameters);
+ int APS5_VABI getrusage_nid_postfix(int who, GuestResourceUsage* usage);
+ int APS5_VABI getrlimit_nid_postfix(int resource, GuestResourceLimit* limit);
+ int APS5_VABI getpriority_nid_postfix(int which, int who);

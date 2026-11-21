@@ -1,0 +1,132 @@
+diff --git a/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp b/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp
+new file mode 100644
+index 0000000..6d01af0
+--- /dev/null
++++ b/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp
+@@ -0,0 +1,49 @@
++#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_COMPAT_HPP
++#define CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_COMPAT_HPP
++
++// AnyPS5 FreeBSD port: Linux-isms used by the core, mapped to their FreeBSD equivalents.
++// Included explicitly by the core sources that need it (not forced into 3rdparty code, which may
++// define its own gettid on FreeBSD). Empty on every other platform.
++#if defined(__FreeBSD__)
++#include <pthread.h>
++#include <pthread_np.h>
++#include <sys/types.h>
++
++// Linux gettid(): the kernel id of the calling thread. FreeBSD's is pthread_getthreadid_np(), the
++// lwpid (same value as thr_self()). Unlike Linux, the main thread's id is NOT the process id:
++// "am I the main thread?" must use pthread_main_np(), not gettid() == getpid().
++inline pid_t gettid() noexcept {
++    return static_cast<pid_t>(pthread_getthreadid_np());
++}
++
++#include <dlfcn.h>
++#include <link.h>
++#ifndef RTLD_DL_LINKMAP
++#define RTLD_DL_LINKMAP 2
++#endif
++
++// glibc dladdr1(..., RTLD_DL_LINKMAP): dladdr() plus the link_map of the object containing the address.
++// FreeBSD rtld fills both dli_fbase (dladdr) and link_map::l_base (linkmap_add) with the object's mapbase,
++// so the object is the entry of the r_debug chain whose l_base is dli_fbase. Only RTLD_DL_LINKMAP is
++// supported (the only flag the core uses).
++inline int dladdr1(const void* address, Dl_info* info, void** extra, int flags) noexcept {
++    if (::dladdr(address, info) == 0) return 0;
++    if (flags != RTLD_DL_LINKMAP || extra == nullptr) return 1;
++    *extra = nullptr;
++    void* const program = ::dlopen(nullptr, RTLD_LAZY);
++    link_map* map = nullptr;
++    const bool known = program != nullptr && ::dlinfo(program, RTLD_DI_LINKMAP, &map) == 0 && map != nullptr;
++    if (program != nullptr) ::dlclose(program);
++    if (!known) return 0;
++    while (map->l_prev != nullptr) map = map->l_prev;
++    for (; map != nullptr; map = map->l_next) {
++        if (map->l_base == static_cast<caddr_t>(info->dli_fbase)) {
++            *extra = map;
++            return 1;
++        }
++    }
++    return 0;
++}
++#endif
++
++#endif
+diff --git a/core/libs/prx/libc/include/specifics/freebsd/HostMemory.hpp b/core/libs/prx/libc/include/specifics/freebsd/HostMemory.hpp
+new file mode 100644
+index 0000000..4e70c16
+--- /dev/null
++++ b/core/libs/prx/libc/include/specifics/freebsd/HostMemory.hpp
+@@ -0,0 +1,58 @@
++#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_HOSTMEMORY_HPP
++#define CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_HOSTMEMORY_HPP
++
++// AnyPS5 FreeBSD port: the two address-space primitives the Linux code takes from /proc/self/maps and
++// MAP_FIXED_NOREPLACE, done the FreeBSD way. Only for FreeBSD builds.
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/mman.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstddef>
++#include <cstdint>
++#include <system_error>
++#include <utility>
++#include <vector>
++
++namespace FreeBsdHostMemory {
++
++// The mappings of this process, sorted by address: sysctl kern.proc.vmmap (packed struct kinfo_vmentry
++// records), the equivalent of reading /proc/self/maps, without procfs or libutil.
++inline std::vector<std::pair<std::uintptr_t, std::uintptr_t>> Mappings() {
++    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, static_cast<int>(getpid())};
++    std::vector<char> buffer;
++    std::size_t length = 0;
++    for (int attempt = 0;; ++attempt) {
++        if (sysctl(mib, 4, nullptr, &length, nullptr, 0) != 0) throw std::system_error(errno, std::generic_category(), "sysctl kern.proc.vmmap (size)");
++        length += length / 3;   // the map may grow between the two calls
++        buffer.resize(length);
++        if (sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0) break;
++        if (errno != ENOMEM || attempt == 8) throw std::system_error(errno, std::generic_category(), "sysctl kern.proc.vmmap");
++    }
++    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> mappings;
++    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
++        const auto* entry = reinterpret_cast<const struct kinfo_vmentry*>(buffer.data() + offset);
++        if (entry->kve_structsize <= 0) break;
++        if (entry->kve_end > entry->kve_start) mappings.emplace_back(static_cast<std::uintptr_t>(entry->kve_start), static_cast<std::uintptr_t>(entry->kve_end));
++        offset += static_cast<std::size_t>(entry->kve_structsize);
++    }
++    return mappings;
++}
++
++// Linux mmap(MAP_FIXED_NOREPLACE): MAP_FIXED | MAP_EXCL. On a range already in use FreeBSD fails with
++// EINVAL (mmap(2)); callers written for Linux retry or skip only on EEXIST, so EINVAL becomes EEXIST.
++// With otherwise valid arguments EINVAL can only mean "in use" or "outside the user address space", and
++// both make the range unusable, as EEXIST does. `flags` must not contain MAP_FIXED/MAP_EXCL.
++inline void* MapNoReplace(void* address, std::size_t bytes, int protection, int flags, int fd = -1, off_t offset = 0) {
++    void* const placed = mmap(address, bytes, protection, flags | MAP_FIXED | MAP_EXCL, fd, offset);
++    if (placed == MAP_FAILED && errno == EINVAL) errno = EEXIST;
++    return placed;
++}
++
++}
++#endif
++
++#endif
+diff --git a/core/libs/prx/libc/include/specifics/linux/ElfTypes.hpp b/core/libs/prx/libc/include/specifics/linux/ElfTypes.hpp
+index c4c6aba..7be089f 100644
+--- a/core/libs/prx/libc/include/specifics/linux/ElfTypes.hpp
++++ b/core/libs/prx/libc/include/specifics/linux/ElfTypes.hpp
+@@ -1,7 +1,7 @@
+ #ifndef PRX_LIBC_INCLUDE_SPECIFICS_LINUX_ELFTYPES_HPP
+ #define PRX_LIBC_INCLUDE_SPECIFICS_LINUX_ELFTYPES_HPP
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__) // FreeBSD has the real <link.h> (dl_phdr_info as glibc)
+ #include <link.h>
+ #else
+ 

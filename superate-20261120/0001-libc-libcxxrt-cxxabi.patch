@@ -1,0 +1,34 @@
+diff --git a/core/libs/prx/libc/include/specifics/itanium/CxxAbi.hpp b/core/libs/prx/libc/include/specifics/itanium/CxxAbi.hpp
+index 217b285..a008eac 100644
+--- a/core/libs/prx/libc/include/specifics/itanium/CxxAbi.hpp
++++ b/core/libs/prx/libc/include/specifics/itanium/CxxAbi.hpp
+@@ -1,7 +1,19 @@
+ #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_ITANIUM_CXXABI_HPP
+ #define CORE_LIBS_PRX_LIBC_INCLUDE_ITANIUM_CXXABI_HPP
+ 
++// AnyPS5 FreeBSD libcxxrt adapter v1.3
++#if defined(__FreeBSD__)
++// FreeBSD: libcxxrt's <cxxabi.h> includes the compiler <unwind.h>, which clashes with the guest
++// unwind ABI of UnwindAbi.hpp. Declare only what this library uses from the host C++ ABI.
++#include <cstddef>
++namespace __cxxabiv1 {
++extern "C" char* __cxa_demangle(const char* mangled_name, char* buf, std::size_t* n, int* status);
++extern "C" int __cxa_thread_atexit(void (*)(void*), void*, void*) noexcept;
++}
++namespace abi = __cxxabiv1;
++#else
+ #include <cxxabi.h>
++#endif
+ 
+ #ifdef __EMSCRIPTEN__
+ namespace __cxxabiv1 {
+@@ -9,7 +21,8 @@ extern "C" int __cxa_thread_atexit(void (*)(void*), void*, void*) noexcept;
+ }
+ #endif
+ 
+-#ifdef _LIBCPPABI_VERSION
++// libcxxrt (FreeBSD) keeps these type_info classes private, like libc++abi.
++#if defined(_LIBCPPABI_VERSION) || defined(__FreeBSD__)
+ #include <typeinfo>
+ 
+ namespace __cxxabiv1 {

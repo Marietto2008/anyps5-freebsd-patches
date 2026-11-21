@@ -1,0 +1,42 @@
+diff --git a/core/libs/prx/libSceFiber/Export.cpp b/core/libs/prx/libSceFiber/Export.cpp
+index 8491ea0..4d30129 100644
+--- a/core/libs/prx/libSceFiber/Export.cpp
++++ b/core/libs/prx/libSceFiber/Export.cpp
+@@ -337,7 +337,10 @@ static void ReleaseHostStack(Fiber* fiber) {
+ static void AllocateHostStack(Fiber* fiber) {
+     const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+     const auto bytes = (fiber->contextSize + FIBER_HOST_STACK_MARGIN + page - 1) / page * page + page;
+-    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
++    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
++#ifdef MAP_NORESERVE
++    flags |= MAP_NORESERVE; // Linux: no swap reservation for the stack (FreeBSD has no such accounting flag)
++#endif
+ #ifdef MAP_STACK
+     flags |= MAP_STACK;
+ #endif
+diff --git a/core/libs/prx/libSceHttp2/Transport.cpp b/core/libs/prx/libSceHttp2/Transport.cpp
+index 33c0f0f..c8f5f35 100644
+--- a/core/libs/prx/libSceHttp2/Transport.cpp
++++ b/core/libs/prx/libSceHttp2/Transport.cpp
+@@ -4,6 +4,7 @@
+ #else
+ #include <netdb.h>
+ #include <netinet/in.h>
++#include <sys/socket.h> // AF_*, SOCK_STREAM: glibc pulls it in through <netdb.h>, FreeBSD does not
+ #include <poll.h>
+ #endif
+ 
+diff --git a/core/libs/prx/libSceUsbd/Export.cpp b/core/libs/prx/libSceUsbd/Export.cpp
+index 2403b56..475540e 100644
+--- a/core/libs/prx/libSceUsbd/Export.cpp
++++ b/core/libs/prx/libSceUsbd/Export.cpp
+@@ -786,7 +786,8 @@ void* APS5_VABI sceUsbdGetDevice(void* deviceHandle) {
+ 
+ int APS5_VABI sceUsbdGetDeviceSpeed(void* device) {
+     if (device == nullptr) return LIBUSB_SPEED_UNKNOWN;
+-    return std::min(libusb_get_device_speed(KnownDevice(device, __func__)), static_cast<int>(LIBUSB_SPEED_SUPER));
++    // FreeBSD's libusb returns enum libusb_speed, libusb-1.0 returns int: compare both as int.
++    return std::min(static_cast<int>(libusb_get_device_speed(KnownDevice(device, __func__))), static_cast<int>(LIBUSB_SPEED_SUPER));
+ }
+ 
+ std::int32_t APS5_VABI sceUsbdGetMaxIsoPacketSize(void* device, std::uint8_t endpoint) {

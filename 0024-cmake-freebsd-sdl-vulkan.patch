@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c07cbe4..ff80876 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1036,6 +1036,12 @@ function(anyps5_add_bundled_sdl2)
+     set(CMAKE_EXE_LINKER_FLAGS "")
+     set(HAVE_DLOPEN OFF)
+     set(HAVE_CLOCK_GETTIME OFF)
++    if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++        # SDL's dependent option allows Vulkan only on Android, Apple, Linux and Windows and forces it off elsewhere,
++        # so the X11 window has no Vulkan surface. FreeBSD loads the same libvulkan.so.1; the option's preset value
++        # (<option>_ISSET) takes the place of that test.
++        set(SDL_VULKAN_ISSET ON)
++    endif()
+     add_subdirectory(3rdparty/SDL2)
+ endfunction()
+ 

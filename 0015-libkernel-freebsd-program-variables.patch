@@ -1,0 +1,22 @@
+diff --git a/core/libs/prx/libkernel/System/src/Process.cpp b/core/libs/prx/libkernel/System/src/Process.cpp
+index a263aa2..f965874 100644
+--- a/core/libs/prx/libkernel/System/src/Process.cpp
++++ b/core/libs/prx/libkernel/System/src/Process.cpp
+@@ -69,6 +69,17 @@
+ #endif
+ 
+ extern char** environ;
++#if defined(__FreeBSD__)
++// On FreeBSD environ and __progname are defined by crt1.o, not by libc.so.7, which only references them. A relinked
++// PS5 executable has no crt1, so libc.so.7 would fail to load with "Undefined symbol environ". libkernel.prx, which
++// every relinked executable loads at startup, defines them; rtld finds them among the startup objects and fills them
++// in before any initializer runs (set_program_var in rtld.c). In an ordinary executable crt1's definitions come first
++// in the lookup and these stay unused. The _nid_no_patch_cut suffix makes nid_patcher export the plain names.
++extern "C" {
++__attribute__((visibility("default"), used)) char** environ_nid_no_patch_cut = nullptr;
++__attribute__((visibility("default"), used)) const char* __progname_nid_no_patch_cut = "";
++}
++#endif
+ namespace {
+ 
+ constexpr int sceInvalidArgument = static_cast<int>(0x80020016u);

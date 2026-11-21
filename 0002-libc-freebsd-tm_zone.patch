@@ -1,0 +1,13 @@
+diff --git a/core/libs/prx/libc/src/Time.cpp b/core/libs/prx/libc/src/Time.cpp
+index 7bc1ebc..b2dc032 100644
+--- a/core/libs/prx/libc/src/Time.cpp
++++ b/core/libs/prx/libc/src/Time.cpp
+@@ -134,7 +134,7 @@ std::tm toHostTm(const GuestTm& guest) {
+     host.tm_isdst = guest.tm_isdst;
+ #ifndef _WIN32
+     host.tm_gmtoff = static_cast<long>(guest.tm_gmtoff);
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__) // AnyPS5 FreeBSD tm_zone v1.3: char *tm_zone
+     host.tm_zone = const_cast<char*>(guest.tm_zone);
+ #else
+     host.tm_zone = guest.tm_zone;

@@ -1,0 +1,215 @@
+diff --git a/core/libs/prx/libSceAgcDriver/tests/DepthSurfaceReuse.cpp b/core/libs/prx/libSceAgcDriver/tests/DepthSurfaceReuse.cpp
+index e9f0d81..152cf45 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/DepthSurfaceReuse.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/DepthSurfaceReuse.cpp
+@@ -28,6 +28,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ 
+ namespace {
+diff --git a/core/libs/prx/libSceAgcDriver/tests/GcnColorTarget.cpp b/core/libs/prx/libSceAgcDriver/tests/GcnColorTarget.cpp
+index d4a66fa..748da10 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/GcnColorTarget.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/GcnColorTarget.cpp
+@@ -10,6 +10,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #include <array>
+ #include <bit>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+index a2a7437..b5d03b3 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+@@ -74,6 +74,7 @@
+ #else
+ #include <fcntl.h>
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #include <unistd.h>
+ #endif
+ #include <functional>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/ShaderMemory.cpp b/core/libs/prx/libSceAgcDriver/tests/ShaderMemory.cpp
+index 788915a..2687782 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/ShaderMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/ShaderMemory.cpp
+@@ -72,6 +72,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ 
+ namespace {
+diff --git a/core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp b/core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp
+index 70f3f27..51c2df9 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/WriteTracking.cpp
+@@ -10,6 +10,7 @@
+ #include <psapi.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #include <unistd.h>
+ #endif
+ #ifdef __GLIBC__
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/GcnColorArraySlices.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/GcnColorArraySlices.cpp
+index 5652e5f..37312c6 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/GcnColorArraySlices.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/GcnColorArraySlices.cpp
+@@ -17,6 +17,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #include <algorithm>
+ #include <array>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/GcnEqaaColorTarget.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/GcnEqaaColorTarget.cpp
+index aed859c..5f7edd4 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/GcnEqaaColorTarget.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/GcnEqaaColorTarget.cpp
+@@ -17,6 +17,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #include <algorithm>
+ #include <array>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/PartiallyResidentSnapshot.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/PartiallyResidentSnapshot.cpp
+index 0e099b2..2ebceef 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/PartiallyResidentSnapshot.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/PartiallyResidentSnapshot.cpp
+@@ -24,6 +24,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #include <algorithm>
+ #include <array>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/RegistrationPrepareStack.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/RegistrationPrepareStack.cpp
+index 1ece633..0331e8b 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/RegistrationPrepareStack.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/RegistrationPrepareStack.cpp
+@@ -18,6 +18,7 @@
+ #include <windows.h>
+ #else
+ #include <pthread.h>
++#include "prx/libc/include/specifics/freebsd/Compat.hpp" // pthread_getattr_np on FreeBSD
+ #endif
+ 
+ namespace {
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/ResidentHeapMirror.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/ResidentHeapMirror.cpp
+index 795afab..60d8252 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/ResidentHeapMirror.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/ResidentHeapMirror.cpp
+@@ -17,6 +17,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #ifdef __APPLE__
+ #include <mach/mach.h>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/SparseHeapImport.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/SparseHeapImport.cpp
+index 076d1a7..5cf76d9 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/SparseHeapImport.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/SparseHeapImport.cpp
+@@ -15,6 +15,7 @@
+ #include <windows.h>
+ #else
+ #include <sys/mman.h>
++#include "prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp"
+ #endif
+ #include <algorithm>
+ #include <array>
+diff --git a/core/libs/prx/libSceAgcDriver/tests/execution/TableIndexValidation.cpp b/core/libs/prx/libSceAgcDriver/tests/execution/TableIndexValidation.cpp
+index 82f9c2d..6431698 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/execution/TableIndexValidation.cpp
++++ b/core/libs/prx/libSceAgcDriver/tests/execution/TableIndexValidation.cpp
+@@ -370,7 +370,7 @@ void Remap(AgcDriver::VulkanDevice& device) {
+     Build(device, scene);
+     Settle(device, scene, "remap");
+     auto* block = reinterpret_cast<std::uint8_t*>(scene.Texels(Key));
+-#ifndef __APPLE__
++#if !defined(__APPLE__) && !defined(__FreeBSD__)
+     void* fresh = mmap(nullptr, BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+     Require(fresh != MAP_FAILED, "remap: cannot map the replacement block");
+     Fill(static_cast<float*>(fresh), 0.0f);
+@@ -381,7 +381,8 @@ void Remap(AgcDriver::VulkanDevice& device) {
+         mutation.Remove(scene.textures.base);
+     }
+     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, BlockBytes);
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
++    // No mremap(2) here: a fresh anonymous mapping placed over the range replaces it the same way.
+     Require(mmap(block, BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == block, "remap: cannot map the replacement block over the texture");
+     Fill(reinterpret_cast<float*>(block), 0.0f);
+ #else
+diff --git a/core/libs/prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp b/core/libs/prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp
+new file mode 100644
+index 0000000..08fe26d
+--- /dev/null
++++ b/core/libs/prx/libc/include/specifics/freebsd/LinuxMmapFlags.hpp
+@@ -0,0 +1,20 @@
++#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_LINUXMMAPFLAGS_HPP
++#define CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_LINUXMMAPFLAGS_HPP
++
++// AnyPS5 FreeBSD port, for test programs only: the two Linux mmap flags the GPU driver tests pass, given their
++// FreeBSD meaning. Library code uses FreeBsdHostMemory::MapNoReplace instead, which also reports EEXIST.
++#if defined(__FreeBSD__)
++#include <sys/mman.h>
++
++// FreeBSD has no MAP_NORESERVE: a private mapping is never charged against swap up front unless vm.overcommit asks.
++#ifndef MAP_NORESERVE
++#define MAP_NORESERVE 0
++#endif
++
++// Same placement rule (fixed address, fail rather than replace); an occupied range fails with EINVAL, not EEXIST.
++#ifndef MAP_FIXED_NOREPLACE
++#define MAP_FIXED_NOREPLACE (MAP_FIXED | MAP_EXCL)
++#endif
++#endif
++
++#endif
+diff --git a/core/libs/tests/GuestBoundsChecking.cpp b/core/libs/tests/GuestBoundsChecking.cpp
+index 4704d88..ff8f09b 100644
+--- a/core/libs/tests/GuestBoundsChecking.cpp
++++ b/core/libs/tests/GuestBoundsChecking.cpp
+@@ -8,6 +8,7 @@
+ #include <cstring>
+ #include <fstream>
+ #include <string>
++#include <vector>
+ 
+ extern "C" {
+ 
+@@ -54,9 +55,18 @@ int APS5_VABI CompareInts(const void* left, const void* right, void* context) {
+     return (a > b) - (a < b);
+ }
+ 
+-std::basic_string<std::uint16_t> Wide(const char* text) {
+-    std::basic_string<std::uint16_t> wide;
+-    while (*text) wide.push_back(static_cast<unsigned char>(*text++));
++// std::basic_string<std::uint16_t> needs std::char_traits<std::uint16_t>, which libc++ 19 no longer provides.
++// The checks use only size(), data() and c_str(), so a terminated vector serves.
++struct WideText {
++    std::vector<std::uint16_t> units{0};
++    std::size_t size() const { return units.size() - 1; }
++    std::uint16_t* data() { return units.data(); }
++    const std::uint16_t* c_str() const { return units.data(); }
++};
++
++WideText Wide(const char* text) {
++    WideText wide;
++    while (*text) wide.units.insert(wide.units.end() - 1, static_cast<unsigned char>(*text++));
+     return wide;
+ }
+ 

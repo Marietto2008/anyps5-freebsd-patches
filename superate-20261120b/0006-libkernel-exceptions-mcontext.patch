@@ -1,0 +1,79 @@
+diff --git a/core/libs/prx/libkernel/System/src/Exception.cpp b/core/libs/prx/libkernel/System/src/Exception.cpp
+index 69d3ba7..3adb9bd 100644
+--- a/core/libs/prx/libkernel/System/src/Exception.cpp
++++ b/core/libs/prx/libkernel/System/src/Exception.cpp
+@@ -34,6 +34,9 @@
+ #ifndef __APPLE__
+ #include <ucontext.h>
+ #endif
++#ifdef __FreeBSD__
++#include <machine/psl.h> // PSL_USERCHANGE for ToHost()
++#endif
+ #include <unistd.h>
+ #endif
+ #ifdef __linux__
+@@ -1098,6 +1101,64 @@ void ToHost(const GuestMcontext& m, mcontext_t& host) {
+     g.__rflags = m.rflags;
+     std::memcpy(reinterpret_cast<unsigned char*>(&host->__fs) + FxsaveImageOffset, m.fpstate, FxsaveRegisterBytes);
+ }
++#elif defined(__FreeBSD__)
++// FreeBSD, the PS5's own base: mcontext_t names the registers mc_*; the FPU image is the fxsave area
++// mc_fpstate, meaningful when mc_ownedfp != _MC_FPOWNED_NONE and mc_fpformat == _MC_FPFMT_XMM.
++bool HostFxsaveValid(const mcontext_t& host) {
++    return host.mc_ownedfp != _MC_FPOWNED_NONE && host.mc_fpformat == _MC_FPFMT_XMM;
++}
++
++void FromHost(const mcontext_t& host, GuestMcontext& m) {
++    m.rdi = static_cast<std::uint64_t>(host.mc_rdi);
++    m.rsi = static_cast<std::uint64_t>(host.mc_rsi);
++    m.rdx = static_cast<std::uint64_t>(host.mc_rdx);
++    m.rcx = static_cast<std::uint64_t>(host.mc_rcx);
++    m.r8 = static_cast<std::uint64_t>(host.mc_r8);
++    m.r9 = static_cast<std::uint64_t>(host.mc_r9);
++    m.rax = static_cast<std::uint64_t>(host.mc_rax);
++    m.rbx = static_cast<std::uint64_t>(host.mc_rbx);
++    m.rbp = static_cast<std::uint64_t>(host.mc_rbp);
++    m.r10 = static_cast<std::uint64_t>(host.mc_r10);
++    m.r11 = static_cast<std::uint64_t>(host.mc_r11);
++    m.r12 = static_cast<std::uint64_t>(host.mc_r12);
++    m.r13 = static_cast<std::uint64_t>(host.mc_r13);
++    m.r14 = static_cast<std::uint64_t>(host.mc_r14);
++    m.r15 = static_cast<std::uint64_t>(host.mc_r15);
++    m.rip = static_cast<std::uint64_t>(host.mc_rip);
++    m.rsp = static_cast<std::uint64_t>(host.mc_rsp);
++    m.rflags = static_cast<std::uint64_t>(host.mc_rflags);
++    m.cs = static_cast<std::uint64_t>(host.mc_cs) & 0xffffu;
++    m.ss = static_cast<std::uint64_t>(host.mc_ss) & 0xffffu;
++    m.len = sizeof(GuestMcontext);
++    static_assert(sizeof(host.mc_fpstate) <= sizeof(m.fpstate) && FxsaveRegisterBytes <= sizeof(host.mc_fpstate));
++    if (HostFxsaveValid(host)) std::memcpy(m.fpstate, host.mc_fpstate, sizeof(host.mc_fpstate));
++}
++
++void ToHost(const GuestMcontext& m, mcontext_t& host) {
++    host.mc_rdi = static_cast<__register_t>(m.rdi);
++    host.mc_rsi = static_cast<__register_t>(m.rsi);
++    host.mc_rdx = static_cast<__register_t>(m.rdx);
++    host.mc_rcx = static_cast<__register_t>(m.rcx);
++    host.mc_r8 = static_cast<__register_t>(m.r8);
++    host.mc_r9 = static_cast<__register_t>(m.r9);
++    host.mc_rax = static_cast<__register_t>(m.rax);
++    host.mc_rbx = static_cast<__register_t>(m.rbx);
++    host.mc_rbp = static_cast<__register_t>(m.rbp);
++    host.mc_r10 = static_cast<__register_t>(m.r10);
++    host.mc_r11 = static_cast<__register_t>(m.r11);
++    host.mc_r12 = static_cast<__register_t>(m.r12);
++    host.mc_r13 = static_cast<__register_t>(m.r13);
++    host.mc_r14 = static_cast<__register_t>(m.r14);
++    host.mc_r15 = static_cast<__register_t>(m.r15);
++    host.mc_rip = static_cast<__register_t>(m.rip);
++    host.mc_rsp = static_cast<__register_t>(m.rsp);
++    // sigreturn(2) refuses a context whose privileged RFLAGS bits changed (Linux masks them itself):
++    // only the user-changeable ones come from the guest.
++    host.mc_rflags = static_cast<__register_t>((static_cast<std::uint64_t>(host.mc_rflags) & ~std::uint64_t{PSL_USERCHANGE})
++        | (m.rflags & std::uint64_t{PSL_USERCHANGE}));
++    if (HostFxsaveValid(host)) std::memcpy(host.mc_fpstate, m.fpstate, FxsaveRegisterBytes);
++}
++
+ #else
+ void FromHost(const mcontext_t& host, GuestMcontext& m) {
+     const auto* g = host.gregs;

@@ -1,0 +1,109 @@
+diff --git a/core/libs/prx/libkernel/File/src/SharedMemory.cpp b/core/libs/prx/libkernel/File/src/SharedMemory.cpp
+index 8cd7866..887dc0e 100644
+--- a/core/libs/prx/libkernel/File/src/SharedMemory.cpp
++++ b/core/libs/prx/libkernel/File/src/SharedMemory.cpp
+@@ -41,10 +41,14 @@ extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handle
+ #include <sys/uio.h>
+ #include <unistd.h>
+ #include <cstdio>
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <filesystem>
+ #include <sys/param.h>
+ #endif
++#ifdef __FreeBSD__
++#include <sys/mman.h>
++#include <sys/user.h> // struct kinfo_file for fcntl(F_KINFO)
++#endif
+ #endif
+ 
+ namespace {
+@@ -75,9 +79,12 @@ const std::wstring& WindowsNamedRoot() {
+ void IgnoreDescriptorParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
+ #endif
+ 
+-#if defined(__linux__) || defined(__APPLE__)
++// FreeBSD follows the Linux design (named objects: shm_open, anonymous: memfd_create), but its shm_open()
++// namespace lives in the kernel with no /dev/shm directory: the canonical temporary directory is used only
++// as the flock() target that serialises the namespace (HostShmLock), as on macOS.
++#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+ const char* NamedObjectDirectory() {
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+     static const std::string directory = [] {
+         std::error_code error;
+         auto canonical = std::filesystem::canonical(std::filesystem::temp_directory_path(error), error);
+@@ -138,6 +145,13 @@ bool IsHostSharedMemoryDescriptor(int descriptor) {
+         return std::all_of(value.begin(), value.end(), [](wchar_t character) { return character >= L'0' && character <= L'9'; });
+     };
+     return decimal(suffix.substr(0, separator)) && decimal(suffix.substr(separator + 1));
++#elif defined(__FreeBSD__)
++    // FreeBSD: the kernel tags every POSIX shared-memory object (shm_open and memfd_create) as KF_TYPE_SHM.
++    // A guest descriptor can only be one through this file, so the type alone identifies it (paths are not
++    // usable: memfd objects have none).
++    struct kinfo_file info{};
++    info.kf_structsize = KINFO_FILE_SIZE;
++    return ::fcntl(descriptor, F_KINFO, &info) == 0 && info.kf_type == KF_TYPE_SHM;
+ #elif defined(__APPLE__)
+     struct stat status{};
+     if (::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) || status.st_nlink > 1) return false;
+@@ -165,14 +179,14 @@ bool IsHostSharedMemoryDescriptor(int descriptor) {
+ class HostShmLock {
+ public:
+     HostShmLock() {
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+         descriptor = ::open(NamedObjectDirectory(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+         if (descriptor < 0 || ::flock(descriptor, LOCK_EX) != 0) error = errno;
+ #endif
+     }
+ 
+     ~HostShmLock() {
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+         const int savedError = errno;
+         if (descriptor >= 0) {
+             if (!error) ::flock(descriptor, LOCK_UN);
+@@ -793,7 +807,7 @@ namespace {
+ class SharedMemoryLock {
+ public:
+     explicit SharedMemoryLock(int value) {
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+         struct stat originalStatus{};
+         if (::fstat(value, &originalStatus) != 0) { shared = true; error = errno; return; }
+ #elif defined(_WIN32)
+@@ -810,7 +824,7 @@ public:
+         if (windowsObjectLock->Error() != ERROR_SUCCESS) { shared = true; error = WindowsNamedError(windowsObjectLock->Error()); if (!error) error = EIO; return; }
+ #endif
+         if (!IsHostSharedMemoryDescriptor(value)) {
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+             struct stat currentStatus{};
+             if (::fstat(value, &currentStatus) != 0) { shared = true; error = errno; return; }
+             if (currentStatus.st_dev != originalStatus.st_dev || currentStatus.st_ino != originalStatus.st_ino) {
+@@ -830,7 +844,7 @@ public:
+ #endif
+         if (!IsHostSharedMemoryDescriptor(descriptor)) { error = EBADF; return; }
+         if (!Refresh()) { error = errno; return; }
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+         if (status.st_dev != originalStatus.st_dev || status.st_ino != originalStatus.st_ino) error = EBADF;
+ #elif defined(_WIN32)
+         BY_HANDLE_FILE_INFORMATION duplicatedStatus{};
+@@ -1110,8 +1124,15 @@ extern "C" int APS5_VABI shm_unlink_nid_postfix(const char* path) {
+         if (const int guest = NamedGuestError(errno)) return Fail(guest);
+         throw std::runtime_error("shm_unlink: locking the host shared-memory namespace failed, errno=" + std::to_string(errno));
+     }
++#ifdef __FreeBSD__
++    // No path to faccessat(): opening the kernel object read-write checks the same R_OK | W_OK permission.
++    const int probe = ::shm_open(hostName.c_str(), O_RDWR | O_CLOEXEC, 0);
++    if (probe >= 0) ::close(probe);
++    if (probe < 0) {
++#else
+     const auto objectPath = NamedObjectDirectory() + hostName;
+     if (::faccessat(AT_FDCWD, objectPath.c_str(), R_OK | W_OK, AT_EACCESS) != 0) {
++#endif
+         const int error = errno;
+         if (const int guest = NamedGuestError(error)) return Fail(guest);
+         throw std::runtime_error("shm_unlink: checking shared-memory permissions failed, errno=" + std::to_string(error));

@@ -1,0 +1,139 @@
+diff --git a/core/libs/prx/libSceJsc/src/WtfHelperAbi.hpp b/core/libs/prx/libSceJsc/src/WtfHelperAbi.hpp
+index 86cdbbe..d2a9343 100644
+--- a/core/libs/prx/libSceJsc/src/WtfHelperAbi.hpp
++++ b/core/libs/prx/libSceJsc/src/WtfHelperAbi.hpp
+@@ -12,7 +12,16 @@ using LChar = std::uint8_t;
+ 
+ enum HexConversionMode { Lowercase, Uppercase };
+ 
++#if defined(_LIBCPP_DEPRECATED_ABI_DISABLE_PAIR_TRIVIAL_COPY_CTOR)
++// FreeBSD's libc++ keeps std::pair non-trivially copyable for its pre-v1 ABI (__configuration/abi.h), which would
++// return it in memory instead of RAX:RDX as the guest expects. Same layout and member names, trivially copyable.
++struct HexResult {
++    LChar* first;
++    unsigned second;
++};
++#else
+ using HexResult = std::pair<LChar*, unsigned>;
++#endif
+ 
+ using SixCharacterHash = std::array<char, 7>;
+ 
+diff --git a/core/libs/prx/libSceNKWebKit/src/CacheControl.cpp b/core/libs/prx/libSceNKWebKit/src/CacheControl.cpp
+index 5d35c23..5c5239e 100644
+--- a/core/libs/prx/libSceNKWebKit/src/CacheControl.cpp
++++ b/core/libs/prx/libSceNKWebKit/src/CacheControl.cpp
+@@ -31,6 +31,9 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstring>
++#include <cwchar>
++#include <ios>
+ #include <string>
+ #include <string_view>
+ #include <utility>
+@@ -41,20 +44,67 @@ namespace {
+ using NKWebKit::HttpAbi::CacheControlDirectives;
+ using NKWebKit::WtfAbi::String;
+ 
++// Latin-1 strings are sequences of unsigned char. libc++ 19 removed the generic std::char_traits template (only
++// char, wchar_t, char8_t, char16_t and char32_t remain), so they get explicit traits; char16_t keeps the standard ones.
++struct LatinTraits {
++    using char_type = unsigned char;
++    using int_type = int;
++    using off_type = std::streamoff;
++    using pos_type = std::streampos;
++    using state_type = std::mbstate_t;
++    static constexpr void assign(char_type& to, const char_type& from) noexcept { to = from; }
++    static constexpr bool eq(char_type a, char_type b) noexcept { return a == b; }
++    static constexpr bool lt(char_type a, char_type b) noexcept { return a < b; }
++    static constexpr int compare(const char_type* a, const char_type* b, std::size_t count) noexcept {
++        for (std::size_t i = 0; i < count; ++i)
++            if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
++        return 0;
++    }
++    static constexpr std::size_t length(const char_type* text) noexcept {
++        std::size_t count = 0;
++        while (text[count] != 0) ++count;
++        return count;
++    }
++    static constexpr const char_type* find(const char_type* text, std::size_t count, const char_type& value) noexcept {
++        for (std::size_t i = 0; i < count; ++i)
++            if (text[i] == value) return text + i;
++        return nullptr;
++    }
++    static char_type* move(char_type* to, const char_type* from, std::size_t count) noexcept {
++        return count == 0 ? to : static_cast<char_type*>(std::memmove(to, from, count));
++    }
++    static char_type* copy(char_type* to, const char_type* from, std::size_t count) noexcept {
++        return count == 0 ? to : static_cast<char_type*>(std::memcpy(to, from, count));
++    }
++    static char_type* assign(char_type* to, std::size_t count, char_type value) noexcept {
++        return count == 0 ? to : static_cast<char_type*>(std::memset(to, value, count));
++    }
++    static constexpr int_type not_eof(int_type value) noexcept { return value == eof() ? 0 : value; }
++    static constexpr char_type to_char_type(int_type value) noexcept { return static_cast<char_type>(value); }
++    static constexpr int_type to_int_type(char_type value) noexcept { return value; }
++    static constexpr bool eq_int_type(int_type a, int_type b) noexcept { return a == b; }
++    static constexpr int_type eof() noexcept { return -1; }
++};
++
++template<class TCharacter> struct CharacterTraits { using Type = std::char_traits<TCharacter>; };
++template<> struct CharacterTraits<unsigned char> { using Type = LatinTraits; };
++template<class TCharacter> using HostString = std::basic_string<TCharacter, typename CharacterTraits<TCharacter>::Type>;
++template<class TCharacter> using HostStringView = std::basic_string_view<TCharacter, typename CharacterTraits<TCharacter>::Type>;
++
+ template<class TCharacter>
+ bool IsSeparator(TCharacter c) {
+     return std::u16string_view(u"()<>@,;:\\\"/[]?={} \t").find(c) != std::u16string_view::npos;
+ }
+ 
+ template<class TCharacter>
+-std::basic_string_view<TCharacter> Trim(std::basic_string_view<TCharacter> value) {
++HostStringView<TCharacter> Trim(HostStringView<TCharacter> value) {
+     std::size_t end = 0;
+     while (end < value.size() && !IsSeparator(value[end])) ++end;
+     return value.substr(0, end);
+ }
+ 
+ template<class TCharacter>
+-bool Equal(std::basic_string_view<TCharacter> value, std::string_view literal) {
++bool Equal(HostStringView<TCharacter> value, std::string_view literal) {
+     if (value.size() != literal.size()) return false;
+     for (std::size_t i = 0; i < value.size(); ++i) {
+         auto c = value[i];
+@@ -65,8 +115,8 @@ bool Equal(std::basic_string_view<TCharacter> value, std::string_view literal) {
+ }
+ 
+ template<class TCharacter>
+-std::vector<std::pair<std::basic_string_view<TCharacter>, std::basic_string_view<TCharacter>>> Parse(std::basic_string_view<TCharacter> header) {
+-    std::vector<std::pair<std::basic_string_view<TCharacter>, std::basic_string_view<TCharacter>>> result;
++std::vector<std::pair<HostStringView<TCharacter>, HostStringView<TCharacter>>> Parse(HostStringView<TCharacter> header) {
++    std::vector<std::pair<HostStringView<TCharacter>, HostStringView<TCharacter>>> result;
+     const auto missing = header.npos;
+     std::size_t pos = 0;
+     while (pos < header.size()) {
+@@ -110,11 +160,11 @@ std::vector<std::pair<std::basic_string_view<TCharacter>, std::basic_string_view
+ 
+ template<class TCharacter>
+ void Apply(const String& input, CacheControlDirectives& result) {
+-    std::basic_string<TCharacter> safe;
++    HostString<TCharacter> safe;
+     auto* characters = static_cast<const TCharacter*>(input.impl->data);
+     for (unsigned i = 0; i < input.impl->length; ++i)
+         if (characters[i] > ' ' && characters[i] != 127) safe.push_back(characters[i]);
+-    for (auto [name, value] : Parse(std::basic_string_view<TCharacter>(safe))) {
++    for (auto [name, value] : Parse(HostStringView<TCharacter>(safe))) {
+         if (Equal(name, "no-cache") && value.empty()) result.noCache = true;
+         else if (Equal(name, "no-store")) result.noStore = true;
+         else if (Equal(name, "must-revalidate")) result.mustRevalidate = true;
+@@ -142,7 +192,7 @@ void Apply(const String& input, CacheControlDirectives& result) {
+ 
+ template<class TCharacter>
+ bool PragmaNoCache(const String& input) {
+-    std::basic_string_view<TCharacter> value(static_cast<const TCharacter*>(input.impl->data), input.impl->length);
++    HostStringView<TCharacter> value(static_cast<const TCharacter*>(input.impl->data), input.impl->length);
+     for (std::size_t i = 0; i + 8 <= value.size(); ++i)
+         if (Equal(value.substr(i, 8), "no-cache")) return true;
+     return false;

@@ -1,0 +1,15 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -256,6 +256,11 @@
+ # of the shared libraries they link (libc, libkernel...). FreeBSD headers need nothing at compile time.
+ if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     add_link_options(-pthread)
++    # Executables are position independent, as the Linux distributions' compilers make them: no copy relocations
++    # of library data into the executable and no fixed load address (the ports clang links at 0x200000).
++    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++    include(CheckPIESupported)
++    check_pie_supported(LANGUAGES CXX)
+ endif()
+ 
+ if(APPLE AND NOT ANYPS5_RELINKER_ONLY)

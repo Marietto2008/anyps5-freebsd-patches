@@ -1,0 +1,47 @@
+diff --git a/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp b/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp
+new file mode 100644
+index 0000000..6124b0b
+--- /dev/null
++++ b/core/libs/prx/libc/include/specifics/freebsd/Compat.hpp
+@@ -0,0 +1,20 @@
++#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_COMPAT_HPP
++#define CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_FREEBSD_COMPAT_HPP
++
++// AnyPS5 FreeBSD port: Linux-isms used by the core, mapped to their FreeBSD equivalents.
++// Included explicitly by the core sources that need it (not forced into 3rdparty code, which may
++// define its own gettid on FreeBSD). Empty on every other platform.
++#if defined(__FreeBSD__)
++#include <pthread.h>
++#include <pthread_np.h>
++#include <sys/types.h>
++
++// Linux gettid(): the kernel id of the calling thread. FreeBSD's is pthread_getthreadid_np(), the
++// lwpid (same value as thr_self()). Unlike Linux, the main thread's id is NOT the process id:
++// "am I the main thread?" must use pthread_main_np(), not gettid() == getpid().
++inline pid_t gettid() noexcept {
++    return static_cast<pid_t>(pthread_getthreadid_np());
++}
++#endif
++
++#endif
+diff --git a/core/libs/prx/libc/src/HeapDiagnostics.cpp b/core/libs/prx/libc/src/HeapDiagnostics.cpp
+index 15f420f..0f8d219 100644
+--- a/core/libs/prx/libc/src/HeapDiagnostics.cpp
++++ b/core/libs/prx/libc/src/HeapDiagnostics.cpp
+@@ -2,6 +2,7 @@
+ #include "prx/libc/include/FileStream.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/HeapDiagnostics.hpp"
++#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
+@@ -49,6 +50,8 @@ unsigned long CurrentProcessId() {
+ unsigned long CurrentThreadId() {
+ #ifdef _WIN32
+     return GetCurrentThreadId();
++#elif defined(__FreeBSD__)
++    return static_cast<unsigned long>(gettid());
+ #else
+     return static_cast<unsigned long>(::syscall(SYS_gettid));
+ #endif

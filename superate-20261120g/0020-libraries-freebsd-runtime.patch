@@ -1,0 +1,892 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/include/AsyncLog.hpp b/core/libs/prx/libSceAgcDriver/Execution/include/AsyncLog.hpp
+index f3bbcf5..59957b3 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/include/AsyncLog.hpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/include/AsyncLog.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "prx/libc/include/HostThread.hpp"
++#include "prx/libc/include/LibraryAtExit.hpp"
+ 
+ #include "prx/libc/include/Shutdown.hpp"
+ #include "prx/libc/include/general/LogMacros.hpp"
+@@ -204,7 +205,7 @@ private:
+         lastStats = Clock::now();
+         if (!asynchronous) return;
+         LogSink().store(&AsyncLog::Sink, std::memory_order_release);
+-        std::atexit(&AsyncLog::FlushAtEnd);
++        LibraryAtExit(&AsyncLog::FlushAtEnd);
+         InitializeWaits();
+         Libc::StartHostThread([this] { Run(); }).detach();
+         LibcSetEndFlush_nid_no_patch(&AsyncLog::FlushAtEnd);
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+index 540e602..b466d44 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+@@ -70,6 +70,8 @@
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
+ #include <sys/mman.h>
++#elif defined(__FreeBSD__)
++#include <sys/mman.h>
+ #endif
+ #endif
+ 
+@@ -859,7 +861,7 @@ void ForgetInaccessiblePages(std::uintptr_t address, std::size_t bytes) {
+     Pages().forgetInaccessible(address, bytes);
+ }
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ int mainImageExtent(dl_phdr_info* info, std::size_t, void* data) {
+     constexpr auto mask = static_cast<std::uintptr_t>(PageBytes - 1);
+     auto& span = *static_cast<PageSpan*>(data);
+@@ -901,7 +903,7 @@ void PageStates::initialize() {
+             image.size = cursor - start;
+             imageCached = image.allocate();
+         }
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+         static const bool noImageCache = std::getenv("APS5_NO_IMAGE_PAGE_CACHE") != nullptr;
+         if (!noImageCache) {
+             dl_iterate_phdr(mainImageExtent, &image);
+@@ -1045,6 +1047,37 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
+             cursor = next;
+             continue;
+         }
++#elif defined(__FreeBSD__)
++        {
++            // No /proc/self/maps on FreeBSD: the covering (or next) mapping from kern.proc.vmmap.
++            const auto mapping = HostMapping::CoveringOrNext(cursor, "guest page query");
++            if (!mapping) {
++                static_cast<void>(emit(PageRun{cursor, end, false, false}));
++                return true;
++            }
++            if (mapping->start > cursor) {
++                const auto gapEnd = std::min<std::uintptr_t>(end, mapping->start);
++                recordRun(gapEnd, false, false);
++                if (!emit(PageRun{cursor, gapEnd, false, false})) return true;
++                cursor = gapEnd;
++                continue;
++            }
++            bool readable = mapping->readable;
++            bool writable = readable && mapping->writable;
++            auto next = std::min<std::uintptr_t>(end, mapping->end);
++            // A watched page is write-protected by the watch itself: its own record is the guest's protection.
++            std::uintptr_t watchedEnd = next;
++            const int logical = GuestWriteWatch::GuestWriteWatchProtection_nid_postfix(cursor, next, &watchedEnd);
++            if (logical >= 0) {
++                readable = readable && (logical & PROT_READ) != 0;
++                writable = readable && (logical & PROT_WRITE) != 0;
++            }
++            if (watchedEnd > cursor && watchedEnd < next) next = watchedEnd;
++            recordRun(next, readable, writable);
++            if (!emit(PageRun{cursor, next, readable, writable})) return true;
++            cursor = next;
++            continue;
++        }
+ #endif
+         std::ifstream maps("/proc/self/maps");
+         if (!maps.is_open()) return false;
+@@ -1118,7 +1151,7 @@ bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
+     return bounds.high != 0 && frame >= bounds.low && frame < bounds.high && address >= frame && address < bounds.high && bytes <= bounds.high - address;
+ }
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ bool pageStateRecorded(std::uintptr_t address, std::size_t bytes) {
+     auto& pages = Pages();
+     pages.initialize();
+@@ -1132,10 +1165,18 @@ bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
+     constexpr std::size_t limit = 4096;
+     if (bytes > limit || HostMapping::QueryFd() >= 0 || pageStateRecorded(address, bytes)) return false;
+     thread_local std::array<std::byte, limit> scratch;
++#if defined(__FreeBSD__)
++    // No process_vm_readv: a trial read through libc's checked copy answers the same question.
++    const int savedErrno = errno;
++    const bool copied = GuestCopyInUnsynced_nid_no_patch(scratch.data(), reinterpret_cast<const void*>(address), bytes);
++    errno = savedErrno;
++    return copied;
++#else
+     iovec local{scratch.data(), bytes};
+     iovec remote{reinterpret_cast<void*>(address), bytes};
+     static const pid_t self = getpid();
+     return ::process_vm_readv(self, &local, 1, &remote, 1, 0) == static_cast<ssize_t>(bytes);
++#endif
+ }
+ #endif
+ 
+@@ -1144,7 +1185,7 @@ bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
+ bool checkAccess(std::uintptr_t address, std::size_t bytes, bool writable, std::string* reason) {
+     const TimedAccess timed(CounterVerify, bytes);
+     if (onOwnLiveStack(address, bytes)) return true;
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+     if (!writable && readableWithoutQuery(address, bytes)) return true;
+ #endif
+     bool accessible = true;
+@@ -1293,7 +1334,7 @@ std::vector<std::uint64_t> PagesOf(std::span<const std::pair<std::uint64_t, std:
+ 
+ std::vector<std::uint8_t> TrappedPages(std::span<const std::uint64_t> pages) {
+     std::vector<std::uint8_t> trapped(pages.size(), 0);
+-#ifdef __APPLE__
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+     std::vector<std::pair<std::uintptr_t, std::uintptr_t>> runs;
+     for (std::size_t from = 0; from < pages.size();) {
+         auto to = from + 1;
+@@ -3837,7 +3878,7 @@ Compare CompareMapped(std::uint64_t address, std::span<const std::byte> bytes) {
+ Compare CopyMapped(std::uint64_t address, std::span<std::byte> out) {
+     if (out.empty()) return Compare::Equal;
+     if (address == 0 || out.size() > std::numeric_limits<std::uintptr_t>::max() - address) return Compare::Unmapped;
+-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
++#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+     const int savedErrno = errno;
+     const bool copied = GuestCopyInUnsynced_nid_no_patch(out.data(), reinterpret_cast<const void*>(address), out.size());
+     errno = savedErrno;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/PerformanceOverlay.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/PerformanceOverlay.cpp
+index c3ba758..1bb8bc5 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/PerformanceOverlay.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/PerformanceOverlay.cpp
+@@ -41,6 +41,9 @@
+ #include <sys/resource.h>
+ #ifdef __APPLE__
+ #include <mach/mach.h>
++#elif defined(__FreeBSD__)
++#include <sys/sysctl.h>
++#include "prx/libc/include/specifics/freebsd/HostMapping.hpp"
+ #endif
+ #endif
+ 
+@@ -632,6 +635,20 @@ std::optional<std::uint64_t> ReadProcessPrivateBytes() {
+     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS || info.phys_footprint == 0) return std::nullopt;
+     return static_cast<std::uint64_t>(info.phys_footprint);
++#elif defined(__FreeBSD__)
++    // No /proc/self/status: the resident private pages of the anonymous mappings, as kern.proc.vmmap counts them
++    // (RssAnon; FreeBSD keeps no per-process swap count).
++    std::uint64_t pages = 0;
++    try {
++        HostMapping::ForEachEntry("process private memory", [&](const struct kinfo_vmentry& entry) {
++            if (HostMapping::FromEntry(entry).inode == 0 && entry.kve_private_resident > 0) pages += static_cast<std::uint64_t>(entry.kve_private_resident);
++            return true;
++        });
++    } catch (const std::runtime_error&) {
++        return std::nullopt;
++    }
++    if (pages == 0) return std::nullopt;
++    return pages * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+ #else
+     std::FILE* status = std::fopen("/proc/self/status", "r");
+     if (status == nullptr) return std::nullopt;
+@@ -690,6 +707,16 @@ std::optional<OverlayMemory> ReadCommitCharge() {
+     if (K32GetPerformanceInfo(&information, sizeof(information)) == 0) return std::nullopt;
+     const auto page = static_cast<std::uint64_t>(information.PageSize);
+     return OverlayMemory{static_cast<std::uint64_t>(information.CommitTotal) * page, static_cast<std::uint64_t>(information.CommitLimit) * page};
++#elif defined(__FreeBSD__)
++    // No /proc/meminfo: the swap reservation is FreeBSD's commit charge, against swap plus physical memory.
++    std::uint64_t reserved = 0, swap = 0, physical = 0;
++    std::size_t length = sizeof(reserved);
++    if (sysctlbyname("vm.swap_reserved", &reserved, &length, nullptr, 0) != 0) return std::nullopt;
++    length = sizeof(swap);
++    if (sysctlbyname("vm.swap_total", &swap, &length, nullptr, 0) != 0) return std::nullopt;
++    length = sizeof(physical);
++    if (sysctlbyname("hw.physmem", &physical, &length, nullptr, 0) != 0) return std::nullopt;
++    return OverlayMemory{reserved, swap + physical};
+ #else
+     std::FILE* meminfo = std::fopen("/proc/meminfo", "r");
+     if (meminfo == nullptr) return std::nullopt;
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+index 612e400..a119abe 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
++++ b/core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+@@ -2555,6 +2555,11 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
+     state->shaderProfile = std::move(shaderProfile);
+     if (compileOnly) return;
+     if (state->deferDestruction) state->contextDeviceProc = Graphics::DeferDestructionToIdle(state->device, state->deviceProc);
++    {
++        const auto resolver = state->contextDeviceProc != nullptr ? state->contextDeviceProc : state->deviceProc;
++        const auto bounded = Graphics::MemoryAccounting::BoundHostAllocations(state->device, resolver, state->properties.vendorID, state->memoryProperties);
++        if (bounded != resolver) state->contextDeviceProc = bounded;
++    }
+     if (calibratedTimestamps != nullptr) {
+         const bool khr = std::strcmp(calibratedTimestamps, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
+         const auto domains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR>(state->instanceProc(state->instance, khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp b/core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp
+index 7383e22..7fbe7ee 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp
+@@ -34,6 +34,11 @@ public:
+     static void ForgetDevice(VkDevice device) noexcept;
+     static Snapshot Read(VkDevice device);
+     static void Report(const Context& context, const VkPhysicalDeviceMemoryBudgetPropertiesEXT& reported, const StorageTextureBudgetSnapshot& storage) noexcept;
++    // The largest system-memory allocation the driver of this device grants (not imports), UINT64_MAX when unbounded.
++    static VkDeviceSize HostAllocationLimit(VkDevice device) noexcept;
++    // Wraps the device resolver of a driver whose system-memory allocations are bounded, so that larger requests are
++    // refused before they reach it; returns the resolver unchanged for other drivers.
++    static PFN_vkGetDeviceProcAddr BoundHostAllocations(VkDevice device, PFN_vkGetDeviceProcAddr resolver, std::uint32_t vendor, const VkPhysicalDeviceMemoryProperties& properties);
+ };
+ 
+ }
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+index c0561a2..e402caf 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+@@ -214,7 +214,7 @@ void PreparePixelFunctionLds(const Context& context, VkCommandBuffer commands, s
+     Require(pool.bufferLayout != VK_NULL_HANDLE, "pixel function LDS descriptor set layout was not created");
+     if (pool.buffer == VK_NULL_HANDLE) {
+         const auto stride = static_cast<std::uint64_t>(subgroupSize) * ShaderRecompiler::FunctionLdsDwordLimit * 4ull;
+-        const auto budget = std::min<std::uint64_t>(context.limits.maxStorageBufferRange, 2ull << 30);
++        const auto budget = std::min({std::uint64_t{context.limits.maxStorageBufferRange}, std::uint64_t{2ull << 30}, std::uint64_t{MemoryAccounting::HostAllocationLimit(context.device)}});
+         Require(budget > 16ull + stride, "pixel function LDS does not fit in the device storage buffer range");
+         pool.slots = static_cast<std::uint32_t>((budget - 16ull) / stride);
+         pool.subgroupSize = subgroupSize;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+index 187c1ff..9bad029 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+@@ -58,6 +58,9 @@ constexpr unsigned long UDMABUF_CREATE_LIST = 0;
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
++#if defined(__FreeBSD__)
++#include "prx/libc/include/specifics/linux/HostMapping.hpp"
++#endif
+ #endif
+ #include <array>
+ #include <vector>
+@@ -762,6 +765,39 @@ const char* createHostPointerImport(const Context& context, HostImport& entry, V
+         return "VK_EXT_external_memory_host";
+     }
+     void* const host = entry.alias != nullptr ? entry.alias : reinterpret_cast<void*>(entry.base);
++#if defined(__FreeBSD__)
++    // The FreeBSD NVIDIA driver cannot pin pages it may not write, and one such failed import leaves the device
++    // refusing almost every later vkAllocateMemory (VK_ERROR_OUT_OF_DEVICE_MEMORY). The write watch keeps watched
++    // pages read-only, so it lets go of the range first: the pages count as written and are watched again at the next
++    // collection, while the pinned pages stay pinned. Read-trapped pages (pending GPU results) and pages the guest
++    // may not write are copied instead.
++    bool readTrapped = false;
++    GuestWriteWatch::GuestWriteWatchReadTraps_nid_postfix(reinterpret_cast<std::uintptr_t>(host), entry.bytes,
++        [](void* context, std::uintptr_t, std::uintptr_t) { *static_cast<bool*>(context) = true; }, &readTrapped);
++    if (readTrapped) {
++        failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++        return "a range with read-trapped pages";
++    }
++    GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(host, entry.bytes);
++    struct WatchReturns {
++        void* host;
++        std::size_t bytes;
++        ~WatchReturns() { GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(host, bytes); }
++    } const watchReturns{host, entry.bytes};
++    {
++        const auto first = reinterpret_cast<std::uint64_t>(host);
++        std::uint64_t covered = first;
++        bool writable = true;
++        HostMapping::Walk(first, first + entry.bytes, "host import", [&](const HostMapping::Mapping& mapping) {
++            if (mapping.start > covered || !mapping.writable) writable = false;
++            covered = std::max(covered, mapping.end);
++        });
++        if (!writable || covered < first + entry.bytes) {
++            failure = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++            return "a range that is not writable throughout";
++        }
++    }
++#endif
+     VkMemoryHostPointerPropertiesEXT pointer{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+     if (const auto result = context.Function<PFN_vkGetMemoryHostPointerPropertiesEXT>("vkGetMemoryHostPointerPropertiesEXT")(context.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host, &pointer); result != VK_SUCCESS) {
+         failure = result;
+@@ -769,7 +805,22 @@ const char* createHostPointerImport(const Context& context, HostImport& entry, V
+     }
+     const VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host};
+     bool allocated = false;
++#if defined(__FreeBSD__)
++    const char* const step = bindImport(context, entry, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, &import, pointer.memoryTypeBits, allocated, failure, true);
++    if (step != nullptr && std::getenv("APS5_IMPORT_MAPPINGS") != nullptr) {
++        const auto first = reinterpret_cast<std::uint64_t>(host);
++        std::fprintf(stderr, "[gpu] import of %#llx+%#llx failed at %s (%d); host mappings:\n", static_cast<unsigned long long>(first), static_cast<unsigned long long>(entry.bytes), step, static_cast<int>(failure));
++        HostMapping::ForEachEntry("import diagnosis", [&](const struct kinfo_vmentry& mapping) {
++            if (mapping.kve_end > first && mapping.kve_start < first + entry.bytes)
++                std::fprintf(stderr, "[gpu]   %#llx-%#llx type %d flags %#x protection %#x resident %d\n", static_cast<unsigned long long>(mapping.kve_start), static_cast<unsigned long long>(mapping.kve_end),
++                    mapping.kve_type, mapping.kve_flags, mapping.kve_protection, mapping.kve_resident);
++            return mapping.kve_start < first + entry.bytes;
++        });
++    }
++    return step;
++#else
+     return bindImport(context, entry, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, &import, pointer.memoryTypeBits, allocated, failure, true);
++#endif
+ }
+ 
+ #ifndef _WIN32
+@@ -5057,6 +5108,11 @@ bool WatchedAfterSettle(const Context& context, std::uint64_t address, std::size
+ namespace {
+ 
+ bool privateAnonymousReadWrite(std::uint64_t begin, std::uint64_t end) {
++#if defined(__FreeBSD__)
++    // No /proc/self/maps: the same question to kern.proc.vmmap.
++    const auto mapping = HostMapping::Find(begin, "host import");
++    return mapping && end <= mapping->end && mapping->readable && mapping->writable && !mapping->executable && !mapping->shared && mapping->inode == 0;
++#endif
+ #ifdef PROCMAP_QUERY
+     static const int mapsFile = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+     if (mapsFile >= 0) {
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp
+index 8b721ee..194c77a 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp
+@@ -7,8 +7,12 @@
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
++#include <cstring>
++#include <limits>
+ #include <map>
+ #include <mutex>
++#include <optional>
++#include <stdexcept>
+ 
+ namespace AgcDriver::Graphics {
+ namespace {
+@@ -29,6 +33,63 @@ Accounting& accounting() {
+     return value;
+ }
+ 
++// The FreeBSD NVIDIA driver refuses every allocation of 256 MiB or more from a system-memory heap (imports of host
++// pointers are not bounded), and once it has refused one it refuses almost every later vkAllocateMemory of the
++// device. Such requests are answered here, without reaching it.
++struct BoundedDevice {
++    PFN_vkGetDeviceProcAddr resolver = nullptr;
++    PFN_vkAllocateMemory allocate = nullptr;
++    VkPhysicalDeviceMemoryProperties properties{};
++    VkDeviceSize limit = 0;
++};
++
++struct BoundedDevices {
++    std::mutex mutex;
++    std::map<VkDevice, BoundedDevice> devices;
++};
++
++BoundedDevices& boundedDevices() {
++    static BoundedDevices value;
++    return value;
++}
++
++std::optional<BoundedDevice> boundedDevice(VkDevice device) {
++    auto& state = boundedDevices();
++    std::lock_guard lock(state.mutex);
++    const auto found = state.devices.find(device);
++    if (found == state.devices.end()) return std::nullopt;
++    return found->second;
++}
++
++bool imports(const void* next) {
++    for (auto* structure = static_cast<const VkBaseInStructure*>(next); structure != nullptr; structure = structure->pNext)
++        if (structure->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT || structure->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR) return true;
++    return false;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL boundedAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks* allocator, VkDeviceMemory* memory) {
++    const auto bounded = boundedDevice(device);
++    if (!bounded) return VK_ERROR_INITIALIZATION_FAILED;
++    if (info != nullptr && info->memoryTypeIndex < bounded->properties.memoryTypeCount && info->allocationSize > bounded->limit && !imports(info->pNext)) {
++        const auto heap = bounded->properties.memoryTypes[info->memoryTypeIndex].heapIndex;
++        if ((bounded->properties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++    }
++    const auto result = bounded->allocate(device, info, allocator, memory);
++    if (result != VK_SUCCESS && info != nullptr && info->memoryTypeIndex < bounded->properties.memoryTypeCount) {
++        // A refusal is worth knowing about here: the driver refuses almost everything after its first one.
++        std::fprintf(stderr, "[gpu] vkAllocateMemory of %llu bytes from memory type %u (heap %u)%s: Vulkan result %d\n", static_cast<unsigned long long>(info->allocationSize),
++            info->memoryTypeIndex, bounded->properties.memoryTypes[info->memoryTypeIndex].heapIndex, imports(info->pNext) ? " importing" : "", static_cast<int>(result));
++    }
++    return result;
++}
++
++VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL boundedDeviceProc(VkDevice device, const char* name) {
++    const auto bounded = boundedDevice(device);
++    if (!bounded) return nullptr;
++    if (std::strcmp(name, "vkAllocateMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(&boundedAllocateMemory);
++    return bounded->resolver(device, name);
++}
++
+ }
+ 
+ bool MemoryAccounting::Enabled() {
+@@ -50,6 +111,37 @@ void MemoryAccounting::Record(VkDevice device, VkDeviceMemory memory, const VkMe
+     }
+ }
+ 
++VkDeviceSize MemoryAccounting::HostAllocationLimit(VkDevice device) noexcept {
++    try {
++        const auto bounded = boundedDevice(device);
++        return bounded ? bounded->limit : std::numeric_limits<VkDeviceSize>::max();
++    } catch (...) {
++        return std::numeric_limits<VkDeviceSize>::max();
++    }
++}
++
++PFN_vkGetDeviceProcAddr MemoryAccounting::BoundHostAllocations(VkDevice device, PFN_vkGetDeviceProcAddr resolver, std::uint32_t vendor, const VkPhysicalDeviceMemoryProperties& properties) {
++#if defined(__FreeBSD__)
++    constexpr std::uint32_t Nvidia = 0x10de;
++    if (vendor != Nvidia || device == VK_NULL_HANDLE || resolver == nullptr) return resolver;
++    BoundedDevice bounded;
++    bounded.resolver = resolver;
++    bounded.allocate = reinterpret_cast<PFN_vkAllocateMemory>(resolver(device, "vkAllocateMemory"));
++    if (bounded.allocate == nullptr) throw std::runtime_error("AGC graphics: missing Vulkan function: vkAllocateMemory");
++    bounded.properties = properties;
++    bounded.limit = (256ull << 20) - 1;
++    auto& state = boundedDevices();
++    std::lock_guard lock(state.mutex);
++    state.devices.insert_or_assign(device, bounded);
++    return &boundedDeviceProc;
++#else
++    static_cast<void>(device);
++    static_cast<void>(vendor);
++    static_cast<void>(properties);
++    return resolver;
++#endif
++}
++
+ VkResult MemoryAccounting::Allocate(const Context& context, const VkMemoryAllocateInfo& allocation, const char* category, VkDeviceMemory* memory) {
+     const auto result = context.Resolved(&DeviceFunctions::allocateMemory, "vkAllocateMemory")(context.device, &allocation, nullptr, memory);
+     if (result == VK_SUCCESS) Record(context.device, *memory, allocation, context.memory, category);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/ResidentMirror.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/ResidentMirror.cpp
+index 40bac5c..da9e8b2 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/ResidentMirror.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/ResidentMirror.cpp
+@@ -244,6 +244,13 @@ void fileData(std::vector<Candidate>& maybe, const Mapping& mapping, int file, s
+ }
+ 
+ void populatedPages(std::vector<Candidate>& maybe, const Mapping& mapping) {
++#if defined(__FreeBSD__)
++    // FreeBSD has no /proc/self/pagemap, and mincore does not see swapped pages: every page of the mapping may hold
++    // data, which is the safe superset.
++    if (!maybe.empty() && maybe.back().end == mapping.begin && maybe.back().readable == mapping.readable) maybe.back().end = mapping.end;
++    else maybe.push_back({mapping.begin, mapping.end, mapping.readable});
++    return;
++#endif
+     static const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+     const int file = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+     Require(file >= 0, "cannot open /proc/self/pagemap for a heap mirror's pages");
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+index 468a91d..37939cf 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+@@ -57,7 +57,7 @@
+ #include <thread>
+ #include <unordered_map>
+ #include <utility>
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <unistd.h>
+ #endif
+ 
+@@ -5256,7 +5256,7 @@ bool StorageTexture::pendingUnitInside(std::uint64_t address, std::size_t bytes)
+ 
+ namespace {
+ 
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+ std::atomic<bool> labelTrapsSet{false};
+ 
+ std::uint64_t TrapPage() {
+@@ -5366,7 +5366,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
+                 ++it;
+             }
+         }
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+         if (!flush.empty() && labelTrapsSet.load(std::memory_order_relaxed)) {
+             const auto selected = flush.size();
+             for (auto it = pending.textures.begin(); it != pending.textures.end();) {
+@@ -5905,7 +5905,7 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
+     return stored;
+ }
+ 
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+ bool StorageTexture::trapReadsAtLabel(const StorageTexture* texture) {
+     auto& pending = Pending();
+     const auto page = TrapPage();
+@@ -5937,13 +5937,13 @@ void StorageTexture::StoreReadbackBeforeLabel(const char* reason, VkDevice devic
+     {
+         auto& pending = Pending();
+         std::lock_guard lock(pending.mutex);
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+         const bool trap = LabelTrapsEnabled();
+         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
+ #endif
+         for (const auto* texture : pending.textures) {
+             if (texture->descriptor.tileMode != TextureTileMode::kLinear && texture->guestBytes > SmallStoreBytes) continue;
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+             if (trap && trapReadsAtLabel(texture)) continue;
+ #endif
+             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
+@@ -5968,14 +5968,14 @@ std::size_t StorageTexture::StoreDrawnLinear(const char* reason) {
+     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
+     {
+         std::lock_guard lock(pending.mutex);
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+         const bool trap = (std::strcmp(reason, "label") == 0 || std::strcmp(reason, "interrupt") == 0) && LabelTrapsEnabled();
+         if (trap) labelTrapsSet.store(true, std::memory_order_relaxed);
+ #endif
+         for (const auto& entry : pending.drawn) {
+             const auto* texture = entry.texture;
+             if (!texture->dirty) continue;
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+             if (trap && texture->descriptor.tileMode == TextureTileMode::kLinear && HostImportCovers(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) && trapReadsAtLabel(texture)) continue;
+ #endif
+             ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
+@@ -7628,7 +7628,7 @@ std::uint64_t StorageTexture::borrowUnits(StorageTexture& source, const std::vec
+ }
+ 
+ void StorageTexture::releaseReadTraps(bool sharingPages) {
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+     if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
+     const auto release = [](const StorageTexture* texture) {
+         if (texture->readTrapped.exchange(false, std::memory_order_acq_rel)) GuestWriteWatch::GuestWriteWatchReleaseReads_nid_postfix(static_cast<std::uintptr_t>(texture->descriptor.baseAddress), static_cast<std::size_t>(texture->guestBytes));
+@@ -7652,7 +7652,7 @@ void StorageTexture::releaseReadTraps(bool sharingPages) {
+ }
+ 
+ void StorageTexture::storeTrappedOverlaps(const char* reason) {
+-#if defined(__APPLE__)
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+     if (!labelTrapsSet.load(std::memory_order_relaxed)) return;
+     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
+     {
+diff --git a/core/libs/prx/libSceFiber/Export.cpp b/core/libs/prx/libSceFiber/Export.cpp
+index 4d30129..5df56d3 100644
+--- a/core/libs/prx/libSceFiber/Export.cpp
++++ b/core/libs/prx/libSceFiber/Export.cpp
+@@ -22,7 +22,7 @@
+ #else
+ #include <sys/mman.h>
+ #include <unistd.h>
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include "prx/libc/include/GuestWriteWatch.hpp"
+ #endif
+ #endif
+@@ -284,7 +284,7 @@ static StackBounds CurrentBounds() {
+ 
+ static void SetBounds(const StackBounds&) {}
+ 
+-#ifdef __APPLE__
++#if defined(APS5_PROTECTION_WRITE_WATCH)
+ static void PinStack(const void* context, std::uint64_t bytes) {
+     GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(context, static_cast<std::size_t>(bytes));
+ }
+diff --git a/core/libs/prx/libSceFont/src/SystemFont.cpp b/core/libs/prx/libSceFont/src/SystemFont.cpp
+index 12d3976..b80e943 100644
+--- a/core/libs/prx/libSceFont/src/SystemFont.cpp
++++ b/core/libs/prx/libSceFont/src/SystemFont.cpp
+@@ -1,4 +1,5 @@
+ #include <algorithm>
++#include "prx/libc/include/HostExecutable.hpp"
+ #include <array>
+ #include <cstdlib>
+ #include <stdexcept>
+@@ -137,6 +138,8 @@ std::filesystem::path ExecutableDirectory() {
+     if (_NSGetExecutablePath(executable.data(), &size) == 0) path = std::filesystem::canonical(executable.data(), error);
+     if (path.empty()) throw std::runtime_error("libSceFont: cannot locate the executable");
+     return path.parent_path();
++#elif defined(__FreeBSD__)
++    return HostExecutable::Own("libSceFont").parent_path();
+ #else
+     return std::filesystem::read_symlink("/proc/self/exe").parent_path();
+ #endif
+diff --git a/core/libs/prx/libSceLibcInternal/Spawn.cpp b/core/libs/prx/libSceLibcInternal/Spawn.cpp
+index 4019d5d..73e22fe 100644
+--- a/core/libs/prx/libSceLibcInternal/Spawn.cpp
++++ b/core/libs/prx/libSceLibcInternal/Spawn.cpp
+@@ -26,7 +26,7 @@
+ #else
+ #include <spawn.h>
+ #endif
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ #include <unistd.h>
+ #elif defined(__APPLE__)
+ #include <crt_externs.h>
+@@ -34,7 +34,7 @@
+ #include <unistd.h>
+ #endif
+ 
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+ extern char** environ;
+ #endif
+ 
+@@ -400,7 +400,7 @@ int SpawnChild(const char* function, const std::string& guest, PosixSpawnFileAct
+         }
+     if (result == 0) {
+         char* const* hostEnvironment = environment;
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__FreeBSD__)
+         if (hostEnvironment == nullptr) hostEnvironment = environ;
+ #elif defined(__APPLE__)
+         if (hostEnvironment == nullptr) hostEnvironment = *_NSGetEnviron();
+diff --git a/core/libs/prx/libSceNetCtl/Export.cpp b/core/libs/prx/libSceNetCtl/Export.cpp
+index ef8c537..71a33c4 100644
+--- a/core/libs/prx/libSceNetCtl/Export.cpp
++++ b/core/libs/prx/libSceNetCtl/Export.cpp
+@@ -20,7 +20,7 @@
+ #ifdef __linux__
+ #include <netpacket/packet.h>
+ #endif
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ #include <net/if_dl.h>
+ #include <sys/sysctl.h>
+ #endif
+@@ -307,13 +307,20 @@ struct HostDefaultRoute {
+     unsigned long metric = 0;
+ };
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+ struct NetCtlDefaultRoute {
+     char name[IF_NAMESIZE];
+     in_addr gateway;
+     std::uint32_t metric;
+ };
+ 
++// Addresses in a routing message are padded to 4 bytes on macOS and to a long on FreeBSD (SA_SIZE in <net/route.h>).
++#if defined(__FreeBSD__)
++constexpr std::size_t RouteAddressAlignment = sizeof(long);
++#else
++constexpr std::size_t RouteAddressAlignment = sizeof(std::uint32_t);
++#endif
++
+ extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::size_t size, NetCtlDefaultRoute* routes, std::size_t capacity) {
+     std::size_t count = 0;
+     for (std::size_t offset = 0; offset + sizeof(rt_msghdr) <= size;) {
+@@ -326,7 +333,7 @@ extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::
+             if (!(header->rtm_addrs & (1 << index))) continue;
+             const auto* address = reinterpret_cast<const sockaddr*>(table + field);
+             addresses[index] = address;
+-            field += address->sa_len ? (address->sa_len + sizeof(std::uint32_t) - 1) & ~(sizeof(std::uint32_t) - 1) : sizeof(std::uint32_t);
++            field += address->sa_len ? (address->sa_len + RouteAddressAlignment - 1) & ~(RouteAddressAlignment - 1) : RouteAddressAlignment;
+         }
+         offset = end;
+         const auto* destination = addresses[RTAX_DST];
+@@ -337,7 +344,11 @@ extern "C" std::size_t NetCtlDefaultRoutes_nid_no_patch(const char* table, std::
+         NetCtlDefaultRoute route{};
+         if (!if_indextoname(header->rtm_index, route.name)) continue;
+         route.gateway = reinterpret_cast<const sockaddr_in*>(gateway)->sin_addr;
++#ifdef RTF_IFSCOPE
+         route.metric = (header->rtm_flags & RTF_IFSCOPE) ? 1 : 0;
++#else
++        route.metric = 0;   // FreeBSD has no interface-scoped routes
++#endif
+         if (count < capacity) routes[count] = route;
+         ++count;
+     }
+@@ -1008,7 +1019,7 @@ static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
+         received += NetCtlReadByteCounter_nid_no_patch((statistics + "rx_bytes").c_str());
+     }
+     freeifaddrs(interfaces);
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || defined(__FreeBSD__)
+     ifaddrs* interfaces = nullptr;
+     if (getifaddrs(&interfaces) != 0) throw std::runtime_error("sceNetCtlGetIfStat: the host interface list is unavailable");
+     for (auto* item = interfaces; item; item = item->ifa_next) {
+diff --git a/core/libs/prx/libSceNpEntitlementAccess/EntitlementsIni.hpp b/core/libs/prx/libSceNpEntitlementAccess/EntitlementsIni.hpp
+index 3732aec..84657ee 100644
+--- a/core/libs/prx/libSceNpEntitlementAccess/EntitlementsIni.hpp
++++ b/core/libs/prx/libSceNpEntitlementAccess/EntitlementsIni.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <algorithm>
++#include "prx/libc/include/HostExecutable.hpp"
+ #include <cstddef>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -41,6 +42,8 @@ inline std::filesystem::path EntitlementsPath() {
+     if (_NSGetExecutablePath(executable.data(), &size) == 0) path = std::filesystem::canonical(executable.data(), error);
+     if (path.empty()) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
+     return path.parent_path() / "anyps5-entitlements.ini";
++#elif defined(__FreeBSD__)
++    return HostExecutable::Own("NpEntitlementAccess").parent_path() / "anyps5-entitlements.ini";
+ #else
+     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "anyps5-entitlements.ini";
+ #endif
+diff --git a/core/libs/prx/libSceSystemService/Export.cpp b/core/libs/prx/libSceSystemService/Export.cpp
+index 9b50a8c..2087eab 100644
+--- a/core/libs/prx/libSceSystemService/Export.cpp
++++ b/core/libs/prx/libSceSystemService/Export.cpp
+@@ -20,7 +20,7 @@
+ #include <vector>
+ #if defined(_WIN32)
+ #include <windows.h>
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+ #include <unistd.h>
+ #elif defined(__APPLE__)
+ #include <mach-o/dyld.h>
+@@ -170,7 +170,7 @@ void StartHostExecutable(HostLaunch& launch) {
+     CloseHandle(process.hThread);
+     CloseHandle(process.hProcess);
+ }
+-#elif defined(__linux__) || defined(__APPLE__)
++#elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+ struct HostLaunch {
+     std::string executable;
+     std::vector<std::string> arguments;
+@@ -389,7 +389,7 @@ int APS5_VABI sceSystemServiceLoadExec(const char* guestPath, const char* const*
+     if (!*path) return SYSTEM_SERVICE_ERROR_PARAMETER;
+     if (std::strcmp(path, "exit") == 0) LibcExitWithoutHandlers_nid_no_patch(0);
+     auto launch = PrepareLaunch(path, arguments);
+-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
++#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+     LoadConvertedExecutable_nid_no_patch(std::filesystem::path(launch.executable), arguments);
+ #endif
+     LibcStartExit_nid_postfix();
+diff --git a/core/libs/prx/libSceSystemService/HostUrlConfirmation.cpp b/core/libs/prx/libSceSystemService/HostUrlConfirmation.cpp
+index 97a0ebb..6932ee3 100644
+--- a/core/libs/prx/libSceSystemService/HostUrlConfirmation.cpp
++++ b/core/libs/prx/libSceSystemService/HostUrlConfirmation.cpp
+@@ -8,7 +8,7 @@ constexpr std::size_t WRAP_WIDTH = 96;
+ constexpr int BUTTON_CANCEL = 0;
+ constexpr int BUTTON_OPEN = 1;
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__) // X11/Wayland desktops
+ bool IsSet(const char* name) {
+     const char* value = std::getenv(name);
+     return value != nullptr && value[0] != '\0';
+@@ -28,7 +28,7 @@ std::string HostConfirmationText(const std::string& url) {
+ }
+ 
+ bool HostMessageBoxConfirmation::Confirm(const std::string& url) {
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__) // X11/Wayland desktops
+     if (!IsSet("DISPLAY") && !IsSet("WAYLAND_DISPLAY")) return false;
+ #endif
+     const std::string text = HostConfirmationText(url);
+diff --git a/core/libs/prx/libSceSystemService/LoadExec.cpp b/core/libs/prx/libSceSystemService/LoadExec.cpp
+index 939f131..d829c0c 100644
+--- a/core/libs/prx/libSceSystemService/LoadExec.cpp
++++ b/core/libs/prx/libSceSystemService/LoadExec.cpp
+@@ -17,7 +17,7 @@
+ #include <vector>
+ #ifdef _WIN32
+ #include <windows.h>
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+ #include <fcntl.h>
+ #include <unistd.h>
+ extern char** environ;
+@@ -146,8 +146,13 @@ Handle Duplicate(HANDLE source, DWORD access) {
+     parent.reset();
+     LibcTerminate_nid_no_patch(0);
+ }
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+ [[noreturn]] void Replace(const std::filesystem::path& target, const std::vector<std::string>& arguments) {
++#if defined(__FreeBSD__)
++    constexpr unsigned char hostOsAbi = 9;   // ELFOSABI_FREEBSD, what relinker --freebsd writes
++#else
++    constexpr unsigned char hostOsAbi = 3;   // ELFOSABI_GNU
++#endif
+     const int descriptor = open(target.c_str(), O_RDONLY | O_CLOEXEC);
+     if (descriptor < 0) throw std::system_error(errno, std::generic_category(), "LoadExec: opening the converted executable");
+     const auto close = [](int* fd) { ::close(*fd); delete fd; };
+@@ -155,8 +160,8 @@ Handle Duplicate(HANDLE source, DWORD access) {
+     std::array<unsigned char, 20> header{};
+     if (pread(descriptor, header.data(), header.size(), 0) != static_cast<ssize_t>(header.size()) ||
+         header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' ||
+-        header[4] != 2 || header[5] != 1 || (header[7] != 0 && header[7] != 3) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 || header[19] != 0 || access(target.c_str(), X_OK) != 0)
+-        throw std::runtime_error("LoadExec: target is not an executable x86-64 Linux ELF");
++        header[4] != 2 || header[5] != 1 || (header[7] != 0 && header[7] != hostOsAbi) || header[17] != 0 || (header[16] != 2 && header[16] != 3) || header[18] != 62 || header[19] != 0 || access(target.c_str(), X_OK) != 0)
++        throw std::runtime_error("LoadExec: target is not an executable x86-64 ELF for this host");
+     std::vector<char*> pointers;
+     for (const auto& argument : arguments) pointers.push_back(const_cast<char*>(argument.c_str()));
+     pointers.push_back(nullptr);
+@@ -209,7 +214,7 @@ Handle Duplicate(HANDLE source, DWORD access) {
+ }
+ 
+ extern "C" bool LoadConvertedExecutable_nid_no_patch(const std::filesystem::path& target, const char* const* arguments) {
+-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
++#if defined(_WIN32) || defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+     if (!arguments || !arguments[0]) return false;
+     std::vector<std::string> copied;
+     for (std::size_t index = 0; arguments[index]; ++index) copied.emplace_back(arguments[index]);
+diff --git a/core/libs/prx/libSceSystemService/PendingExports.cpp b/core/libs/prx/libSceSystemService/PendingExports.cpp
+index e8a0fc8..aab2da5 100644
+--- a/core/libs/prx/libSceSystemService/PendingExports.cpp
++++ b/core/libs/prx/libSceSystemService/PendingExports.cpp
+@@ -859,8 +859,8 @@ std::uint64_t APS5_VABI sceShellCoreUtilGetFreeSizeOfAvContentsTmp() {
+ }
+ 
+ int APS5_VABI sceShellCoreUtilGetFreeSizeOfUserPartition(std::uint64_t* freeSize, std::uint64_t* totalSize) {
++    const int savedErrno = errno; // before HostSpace: FreeBSD's std::filesystem::space changes errno even when it succeeds
+     const std::filesystem::space_info space = HostSpace();
+-    const int savedErrno = errno;
+     if (freeSize != nullptr) {
+         const std::uint64_t localFree = space.available;
+         if (!GuestCopyOut_nid_no_patch(freeSize, &localFree, sizeof(localFree))) {
+diff --git a/core/libs/prx/libSceUlt/CMakeLists.txt b/core/libs/prx/libSceUlt/CMakeLists.txt
+index bed4b45..d47707b 100644
+--- a/core/libs/prx/libSceUlt/CMakeLists.txt
++++ b/core/libs/prx/libSceUlt/CMakeLists.txt
+@@ -12,7 +12,12 @@ if(BUILD_TESTING)
+         target_compile_definitions(guest_ult_thread_lifecycle_tests PRIVATE ULT_LIFECYCLE_INTERPOSE=1)
+         target_link_options(guest_ult_thread_lifecycle_tests PRIVATE
+             LINKER:--wrap=pthread_mutex_lock LINKER:--wrap=pthread_mutex_unlock LINKER:--wrap=__pthread_cleanup_push_imp_nid_postfix)
+-        list(APPEND ultLifecycleCases publication generation cleanup-setup)
++        list(APPEND ultLifecycleCases cleanup-setup)
++        # publication and generation pause inside std::mutex::lock through --wrap=pthread_mutex_lock, which only reaches
++        # a lock inlined into the test (libstdc++); FreeBSD's libc++, like Apple's, locks inside the shared library.
++        if(NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++            list(APPEND ultLifecycleCases publication generation)
++        endif()
+     endif()
+     foreach(testCase IN LISTS ultLifecycleCases)
+         add_test(NAME guest_ult_thread_lifecycle_${testCase} COMMAND guest_ult_thread_lifecycle_tests ${testCase})
+diff --git a/core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp b/core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp
+index fbeb7b5..e178fe8 100644
+--- a/core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp
++++ b/core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp
+@@ -346,7 +346,7 @@ VideoOutDriver::VideoOutDriver() {
+         SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
+         if (std::getenv("APS5_NO_WGI") != nullptr) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_DEFAULT);
+ #endif
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+         SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+ #endif
+         if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
+diff --git a/core/shader/recompiler/ShaderDiskCache.cpp b/core/shader/recompiler/ShaderDiskCache.cpp
+index 6280a2b..14d4e1a 100644
+--- a/core/shader/recompiler/ShaderDiskCache.cpp
++++ b/core/shader/recompiler/ShaderDiskCache.cpp
+@@ -25,6 +25,11 @@
+ #endif
+ #include "ShaderCacheSourceVersion.hpp"
+ #include "prx/libc/include/RemoveTree.hpp"
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <climits>
++#endif
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
+@@ -74,6 +79,13 @@ std::filesystem::path ShaderCacheDirectory() {
+     std::vector<char> buffer(size);
+     if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
+     const auto executable = std::filesystem::canonical(buffer.data(), error);
++#elif defined(__FreeBSD__)
++    // No /proc/self/exe: kern.proc.pathname gives the absolute path of the running executable.
++    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
++    char own[PATH_MAX];
++    std::size_t length = sizeof(own);
++    if (sysctl(mib, 4, own, &length, nullptr, 0) != 0 || length == 0) return {};
++    const std::filesystem::path executable(own);
+ #else
+     const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+ #endif

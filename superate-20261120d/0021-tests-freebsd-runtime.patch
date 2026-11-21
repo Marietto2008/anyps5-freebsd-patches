@@ -1,0 +1,418 @@
+diff --git a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_collect_memo_generation_tests.cmake b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_collect_memo_generation_tests.cmake
+index b171a81..6a2de34 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_collect_memo_generation_tests.cmake
++++ b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_collect_memo_generation_tests.cmake
+@@ -6,6 +6,11 @@ if(BUILD_TESTING)
+     )
+     target_include_directories(agc_collect_memo_generation_tests PRIVATE ${LIBS_INCLUDE_DIR})
+     target_link_libraries(agc_collect_memo_generation_tests PRIVATE shader_recompiler_agc_driver libc)
++    # GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
++    find_package(Backtrace)
++    if(Backtrace_FOUND AND Backtrace_LIBRARIES)
++        target_link_libraries(agc_collect_memo_generation_tests PRIVATE ${Backtrace_LIBRARIES})
++    endif()
+     set_target_properties(agc_collect_memo_generation_tests PROPERTIES CXX_EXTENSIONS OFF)
+     configure_windows_unwind(agc_collect_memo_generation_tests)
+     add_test(NAME agc_collect_memo_generation COMMAND agc_collect_memo_generation_tests)
+diff --git a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_mapped_copy_tests.cmake b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_mapped_copy_tests.cmake
+index fbab98c..a28f7a4 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_mapped_copy_tests.cmake
++++ b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_mapped_copy_tests.cmake
+@@ -6,6 +6,11 @@ if(BUILD_TESTING)
+     )
+     target_include_directories(agc_mapped_copy_tests PRIVATE ${LIBS_INCLUDE_DIR})
+     target_link_libraries(agc_mapped_copy_tests PRIVATE shader_recompiler_agc_driver libc)
++    # GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
++    find_package(Backtrace)
++    if(Backtrace_FOUND AND Backtrace_LIBRARIES)
++        target_link_libraries(agc_mapped_copy_tests PRIVATE ${Backtrace_LIBRARIES})
++    endif()
+     set_target_properties(agc_mapped_copy_tests PROPERTIES CXX_EXTENSIONS OFF)
+     configure_windows_unwind(agc_mapped_copy_tests)
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_shader_memory_tests.cmake b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_shader_memory_tests.cmake
+index 0522f9d..6c50e69 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_shader_memory_tests.cmake
++++ b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_shader_memory_tests.cmake
+@@ -10,6 +10,11 @@ add_test_executable(agc_shader_memory_tests EXCLUDE_FROM_ALL
+ )
+ target_include_directories(agc_shader_memory_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+ target_link_libraries(agc_shader_memory_tests PRIVATE shader_recompiler_agc_driver libc)
++# GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
++find_package(Backtrace)
++if(Backtrace_FOUND AND Backtrace_LIBRARIES)
++    target_link_libraries(agc_shader_memory_tests PRIVATE ${Backtrace_LIBRARIES})
++endif()
+ set_target_properties(agc_shader_memory_tests PROPERTIES CXX_EXTENSIONS OFF)
+ configure_windows_unwind(agc_shader_memory_tests)
+ 
+diff --git a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake
+index bdab55a..3ce038a 100644
+--- a/core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake
++++ b/core/libs/prx/libSceAgcDriver/tests/cmake/agc_write_tracking_tests.cmake
+@@ -5,6 +5,11 @@ add_test_executable(agc_write_tracking_tests EXCLUDE_FROM_ALL
+ )
+ target_include_directories(agc_write_tracking_tests PRIVATE ${LIBS_INCLUDE_DIR})
+ target_link_libraries(agc_write_tracking_tests PRIVATE shader_recompiler_agc_driver libc)
++# GuestMemory.cpp calls backtrace(), which lives in libexecinfo on FreeBSD.
++find_package(Backtrace)
++if(Backtrace_FOUND AND Backtrace_LIBRARIES)
++    target_link_libraries(agc_write_tracking_tests PRIVATE ${Backtrace_LIBRARIES})
++endif()
+ set_target_properties(agc_write_tracking_tests PROPERTIES CXX_EXTENSIONS OFF)
+ configure_windows_unwind(agc_write_tracking_tests)
+ 
+diff --git a/core/libs/prx/libSceIcu/tests/DataMemoryClose.cpp b/core/libs/prx/libSceIcu/tests/DataMemoryClose.cpp
+index 6b78b2b..13001d0 100644
+--- a/core/libs/prx/libSceIcu/tests/DataMemoryClose.cpp
++++ b/core/libs/prx/libSceIcu/tests/DataMemoryClose.cpp
+@@ -13,6 +13,11 @@
+ #else
+ #include <sys/mman.h>
+ #include <unistd.h>
++#if defined(__linux__)
++using MincoreVector = unsigned char;
++#else
++using MincoreVector = char; // FreeBSD and macOS declare mincore(const void *, size_t, char *)
++#endif
+ #endif
+ 
+ namespace UdataClose {
+@@ -119,7 +124,7 @@ void Mapping() {
+     guarded.data.length = static_cast<std::int32_t>(pageSize);
+     udata_close_nid_postfix(&guarded.data);
+ 
+-    unsigned char residency = 0;
++    MincoreVector residency = 0;
+     errno = 0;
+     Require(mincore(mapping, pageSize, &residency) == -1);
+     Require(errno == ENOMEM);
+@@ -159,7 +164,7 @@ void Heap() {
+     data->length = static_cast<std::int32_t>(pageSize);
+     udata_close_nid_postfix(data);
+ 
+-    unsigned char residency = 0;
++    MincoreVector residency = 0;
+     errno = 0;
+     Require(mincore(mapping, pageSize, &residency) == -1);
+     Require(errno == ENOMEM);
+diff --git a/core/libs/prx/libSceNKWebKit/tests/HtmlSpaceTrim.cpp b/core/libs/prx/libSceNKWebKit/tests/HtmlSpaceTrim.cpp
+index 6748fb0..e251d9b 100644
+--- a/core/libs/prx/libSceNKWebKit/tests/HtmlSpaceTrim.cpp
++++ b/core/libs/prx/libSceNKWebKit/tests/HtmlSpaceTrim.cpp
+@@ -102,7 +102,7 @@ int main() {
+             Require(emptyImpl.refCount == 2);
+             empty.impl = nullptr;
+         }
+-        TestWidth<unsigned char>();
++        TestWidth<char8_t>(); // the 8-bit width: libc++ 19 has no char_traits<unsigned char>, char8_t is the same unit
+         TestWidth<char16_t>();
+         Check<char16_t>(u" \u3000\u1234\t", u"\u3000\u1234");
+     } catch (const std::exception& error) {
+diff --git a/core/libs/prx/libcurl/tests/CurlSockets.cpp b/core/libs/prx/libcurl/tests/CurlSockets.cpp
+index 3349e7c..5764f7e 100644
+--- a/core/libs/prx/libcurl/tests/CurlSockets.cpp
++++ b/core/libs/prx/libcurl/tests/CurlSockets.cpp
+@@ -12,6 +12,7 @@
+ #include <ws2tcpip.h>
+ #else
+ #include <arpa/inet.h>
++#include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <unistd.h>
+ #endif
+diff --git a/core/libs/tests/ApplicationHeap.cpp b/core/libs/tests/ApplicationHeap.cpp
+index 89cce7b..346efc9 100644
+--- a/core/libs/tests/ApplicationHeap.cpp
++++ b/core/libs/tests/ApplicationHeap.cpp
+@@ -18,7 +18,7 @@
+ #define NOMINMAX
+ #endif
+ #include <windows.h>
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+ #include "ProcessParametersFixture.hpp"
+ #include <dlfcn.h>
+ #elif defined(__APPLE__)
+@@ -81,7 +81,7 @@ void installProcessParameters(bool present = true) {
+     target->Misc.VirtualSize = sizeof(processParameterMetadata);
+     DWORD restored = 0;
+     VirtualProtect(target, sizeof(*target), oldProtect, &restored);
+-#elif defined(__linux__) || defined(__APPLE__)
++#elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+     require(ProcessParametersFixture::Install(process.data(), process.size()));
+ #endif
+ }
+diff --git a/core/libs/tests/GuestNpWebApi2.cpp b/core/libs/tests/GuestNpWebApi2.cpp
+index 64af299..1f72d5f 100644
+--- a/core/libs/tests/GuestNpWebApi2.cpp
++++ b/core/libs/tests/GuestNpWebApi2.cpp
+@@ -1,6 +1,7 @@
+ #include "prx/libSceNpWebApi2/include/Api.hpp"
+ #include "prx/libc/include/GuestArena.hpp"
+ #include "SceTypes.hpp"
++#include <initializer_list>
+ #include <cstddef>
+ #include <cerrno>
+ #include <cstdint>
+diff --git a/core/libs/tests/GuestSysarch.cpp b/core/libs/tests/GuestSysarch.cpp
+index ce8c476..079769e 100644
+--- a/core/libs/tests/GuestSysarch.cpp
++++ b/core/libs/tests/GuestSysarch.cpp
+@@ -12,14 +12,14 @@ static void Require(bool value) { if (!value) std::abort(); }
+ #if (defined(__linux__) || defined(_WIN32)) && defined(__x86_64__)
+ static void* APS5_VABI ReadGsBase(void* arg) {
+     auto* read = static_cast<std::uint64_t*>(arg);
+-    if (sysarch(130, read) != 0) *read = 0;
++    if (sysarch_nid_postfix(130, read) != 0) *read = 0;
+     return nullptr;
+ }
+ 
+ static void RequireLowHalf(int operation, std::uint64_t base) {
+     unsigned char bytes[8];
+     std::memset(bytes, 0xaa, sizeof(bytes));
+-    Require(sysarch(operation, bytes) == 0);
++    Require(sysarch_nid_postfix(operation, bytes) == 0);
+     std::uint32_t low = 0;
+     std::memcpy(&low, bytes, sizeof(low));
+     Require(low == static_cast<std::uint32_t>(base));
+@@ -34,9 +34,9 @@ struct ThreadBases {
+ static void* APS5_VABI ChangeGsBase(void* arg) {
+     auto& bases = *static_cast<ThreadBases*>(arg);
+     std::uint64_t read = 0;
+-    Require(sysarch(130, &read) == 0 && read == bases.expected);
+-    Require(sysarch(131, &bases.replacement) == 0);
+-    Require(sysarch(130, &read) == 0 && read == bases.replacement);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == bases.expected);
++    Require(sysarch_nid_postfix(131, &bases.replacement) == 0);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == bases.replacement);
+     RequireLowHalf(9, read);
+     Pthread nested = nullptr;
+     std::uint64_t inherited = 0;
+@@ -49,11 +49,11 @@ static void* APS5_VABI ChangeGsBase(void* arg) {
+ int main() {
+     for (const int operation : {2, 5, 6, 12, 127, 133, 134, 1000, -1}) {
+         *__error_nid_postfix() = 0;
+-        Require(sysarch(operation, nullptr) == -1 && *__error_nid_postfix() == 22);
++        Require(sysarch_nid_postfix(operation, nullptr) == -1 && *__error_nid_postfix() == 22);
+     }
+     for (const int operation : {3, 4, 11, 132}) {
+         *__error_nid_postfix() = 0;
+-        Require(sysarch(operation, nullptr) == -1 && *__error_nid_postfix() == 14);
++        Require(sysarch_nid_postfix(operation, nullptr) == -1 && *__error_nid_postfix() == 14);
+     }
+     struct {
+         std::uint32_t start;
+@@ -73,54 +73,54 @@ int main() {
+                 ldt.descsLow = static_cast<std::uint32_t>(address);
+                 ldt.descsHigh = static_cast<std::uint32_t>(address >> 32);
+                 *__error_nid_postfix() = 0;
+-                Require(sysarch(operation, argument) == -1 && *__error_nid_postfix() == 22);
++                Require(sysarch_nid_postfix(operation, argument) == -1 && *__error_nid_postfix() == 22);
+             }
+         }
+     }
+     std::uint32_t ports[3] = {0x60, 5, 1};
+-    Require(sysarch(3, ports) == 0 && ports[0] == 0x60 && ports[1] == 0 && ports[2] == 1);
++    Require(sysarch_nid_postfix(3, ports) == 0 && ports[0] == 0x60 && ports[1] == 0 && ports[2] == 1);
+     std::uint32_t outsidePorts[3] = {65536, 5, 1};
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(3, outsidePorts) == -1 && *__error_nid_postfix() == 22 && outsidePorts[1] == 5);
++    Require(sysarch_nid_postfix(3, outsidePorts) == -1 && *__error_nid_postfix() == 22 && outsidePorts[1] == 5);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(4, ports) == -1 && *__error_nid_postfix() == 1);
++    Require(sysarch_nid_postfix(4, ports) == -1 && *__error_nid_postfix() == 1);
+ #if (defined(__linux__) || defined(_WIN32)) && defined(__x86_64__)
+     static std::uint64_t slots[2] = {0x1234567890abcdefull, 0};
+     std::uint64_t base = reinterpret_cast<std::uintptr_t>(slots);
+-    Require(sysarch(131, &base) == 0);
++    Require(sysarch_nid_postfix(131, &base) == 0);
+     std::uint64_t read = 0;
+-    Require(sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == base);
+ #ifdef __linux__
+     std::uint64_t through = 0;
+     asm volatile("movq %%gs:0, %0" : "=r"(through));
+     Require(through == slots[0]);
+     std::uint64_t fs = 0;
+-    Require(sysarch(128, &fs) == 0 && fs != 0);
++    Require(sysarch_nid_postfix(128, &fs) == 0 && fs != 0);
+     std::uint64_t self = 0;
+     asm volatile("movq %%fs:0, %0" : "=r"(self));
+     Require(self == fs);
+     RequireLowHalf(7, fs);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(7, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(7, nullptr) == -1 && *__error_nid_postfix() == 14);
+ #endif
+     RequireLowHalf(9, base);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(9, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(9, nullptr) == -1 && *__error_nid_postfix() == 14);
+     void* const bad = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x10));
+ #ifdef __linux__
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(7, bad) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(7, bad) == -1 && *__error_nid_postfix() == 14);
+ #endif
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(9, bad) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(9, bad) == -1 && *__error_nid_postfix() == 14);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(128, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(128, nullptr) == -1 && *__error_nid_postfix() == 14);
+ #ifdef __linux__
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(128, bad) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(128, bad) == -1 && *__error_nid_postfix() == 14);
+ #endif
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(130, bad) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(130, bad) == -1 && *__error_nid_postfix() == 14);
+     std::uint64_t inherited = 0;
+     Pthread child = nullptr;
+     Require(scePthreadCreate(&child, nullptr, ReadGsBase, &inherited, "sysarch_gs") == 0);
+@@ -128,31 +128,31 @@ int main() {
+     ThreadBases bases{base, 0x0000123456789abcull};
+     Require(scePthreadCreate(&child, nullptr, ChangeGsBase, &bases, "sysarch_change") == 0);
+     Require(scePthreadJoin(child, nullptr) == 0);
+-    Require(sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == base);
+     Require(pthread_create_nid_postfix(&child, nullptr, ChangeGsBase, &bases) == 0);
+     Require(pthread_join_nid_postfix(child, nullptr) == 0);
+-    Require(sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == base);
+     std::uint64_t outside = 0x0000800000000000ull;
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(131, &outside) == -1 && *__error_nid_postfix() == 22);
+-    Require(sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(131, &outside) == -1 && *__error_nid_postfix() == 22);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == base);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(131, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(131, nullptr) == -1 && *__error_nid_postfix() == 14);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(131, bad) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(131, bad) == -1 && *__error_nid_postfix() == 14);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(130, nullptr) == -1 && *__error_nid_postfix() == 14);
+-    Require(sysarch(131, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
+-    Require(sysarch(130, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
+-    Require(sysarch(9, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
+-    Require(sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(130, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(131, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(130, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(9, reinterpret_cast<void*>(1)) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(130, &read) == 0 && read == base);
+     std::uint32_t low = 0x12345678;
+-    Require(sysarch(10, &low) == 0 && sysarch(130, &read) == 0 && read == 0x12345678);
++    Require(sysarch_nid_postfix(10, &low) == 0 && sysarch_nid_postfix(130, &read) == 0 && read == 0x12345678);
+     *__error_nid_postfix() = 0;
+-    Require(sysarch(10, nullptr) == -1 && *__error_nid_postfix() == 14);
+-    Require(sysarch(131, &base) == 0 && sysarch(130, &read) == 0 && read == base);
++    Require(sysarch_nid_postfix(10, nullptr) == -1 && *__error_nid_postfix() == 14);
++    Require(sysarch_nid_postfix(131, &base) == 0 && sysarch_nid_postfix(130, &read) == 0 && read == base);
+     std::uint64_t zero = 0;
+-    Require(sysarch(131, &zero) == 0 && sysarch(130, &read) == 0 && read == 0);
++    Require(sysarch_nid_postfix(131, &zero) == 0 && sysarch_nid_postfix(130, &read) == 0 && read == 0);
+ #endif
+     return 0;
+ }
+diff --git a/core/libs/tests/GuestSysmodule.cpp b/core/libs/tests/GuestSysmodule.cpp
+index c83c89f..bb06e06 100644
+--- a/core/libs/tests/GuestSysmodule.cpp
++++ b/core/libs/tests/GuestSysmodule.cpp
+@@ -16,12 +16,18 @@
+ #include <windows.h>
+ #include <psapi.h>
+ #endif
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ #include <cstdio>
+ #include <fstream>
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #endif
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <sys/user.h>
++#include <vector>
++#endif
+ #ifdef __APPLE__
+ #include <dlfcn.h>
+ #include <mach/mach.h>
+@@ -62,7 +68,7 @@ constexpr std::uint32_t kAgcModuleId = 0x80000094;
+ constexpr std::uint32_t kHdrScopesInternalModuleId = 0x800000bd;
+ constexpr std::uint32_t kMeasuredInternalUnloadedModuleId = 0x800000c4u;
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__FreeBSD__)
+ struct Mapping {
+     std::uint64_t start = 0;
+     std::uint64_t end = 0;
+@@ -70,6 +76,22 @@ struct Mapping {
+ };
+ 
+ Mapping MapsEntry(std::uint64_t address) {
++#if defined(__FreeBSD__)
++    // No /proc/self/maps: the kern.proc.vmmap records, read here directly.
++    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, static_cast<int>(getpid())};
++    std::size_t length = 0;
++    Require(sysctl(mib, 4, nullptr, &length, nullptr, 0) == 0);
++    length += length / 3;
++    std::vector<char> buffer(length);
++    Require(sysctl(mib, 4, buffer.data(), &length, nullptr, 0) == 0);
++    for (std::size_t offset = 0; offset + sizeof(int) <= length;) {
++        const auto* entry = reinterpret_cast<const struct kinfo_vmentry*>(buffer.data() + offset);
++        if (entry->kve_structsize <= 0) break;
++        offset += static_cast<std::size_t>(entry->kve_structsize);
++        if (address >= entry->kve_start && address < entry->kve_end) return Mapping{entry->kve_start, entry->kve_end, std::string(entry->kve_path).substr(0, 4095)};
++    }
++    std::abort();
++#else
+     std::ifstream maps("/proc/self/maps");
+     std::string line;
+     while (std::getline(maps, line)) {
+@@ -87,6 +109,7 @@ Mapping MapsEntry(std::uint64_t address) {
+         }
+     }
+     std::abort();
++#endif
+ }
+ 
+ void RequireUnwindMatchesMaps(const void* pointer) {
+diff --git a/core/libs/tests/ProcessParametersFixture.hpp b/core/libs/tests/ProcessParametersFixture.hpp
+index 2bd89f1..36192cb 100644
+--- a/core/libs/tests/ProcessParametersFixture.hpp
++++ b/core/libs/tests/ProcessParametersFixture.hpp
+@@ -9,8 +9,9 @@
+ #define NOMINMAX
+ #endif
+ #include <windows.h>
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+ #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
++#include "prx/libc/include/specifics/linux/MainProgram.hpp"
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #elif defined(__APPLE__)
+@@ -51,7 +52,7 @@ bool Install(std::byte* process, std::size_t size) {
+     DWORD restored = 0;
+     VirtualProtect(target, sizeof(*target), oldProtect, &restored);
+     return true;
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__)
+     struct Request {
+         std::byte* process;
+         std::size_t size;
+@@ -59,7 +60,7 @@ bool Install(std::byte* process, std::size_t size) {
+     } request{process, size, false};
+     dl_iterate_phdr([](dl_phdr_info* image, std::size_t, void* data) {
+         auto& request = *static_cast<Request*>(data);
+-        if (image->dlpi_name != nullptr && image->dlpi_name[0] != '\0') return 0;
++        if (!MainProgramImage(*image)) return 0;
+         for (std::uint16_t index = 0; index < image->dlpi_phnum; ++index) {
+             const auto& header = image->dlpi_phdr[index];
+             if (header.p_type == PT_LOAD || header.p_type == PT_GNU_EH_FRAME || header.p_type < 0x60000000u) continue;

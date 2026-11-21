@@ -1,0 +1,36 @@
+diff --git a/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp b/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
+index b70a17e..0dedbee 100644
+--- a/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
++++ b/core/libs/prx/libkernel/Module/src/DynamicLoader.cpp
+@@ -1,6 +1,7 @@
+ #include "prx/libkernel/include/Api.hpp"
+ #include "prx/libc/include/General.hpp"
+ #include "prx/libc/include/GuestAllocations.hpp"
++#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+ #include "prx/libkernel/Module/ModuleArgs.hpp"
+ #include <nid/NidCompute.hpp>
+ #include <algorithm>
+diff --git a/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp b/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
+index bf34e07..f777763 100644
+--- a/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
++++ b/core/libs/prx/libkernel/Module/src/ModuleInfo.cpp
+@@ -12,6 +12,7 @@
+ #include <vector>
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
++#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+ #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+ #include "prx/libkernel/KernelErrors.hpp"
+ #include "prx/libkernel/Module/EhFrame.hpp"
+diff --git a/core/libs/prx/libkernel/System/src/Rtld.cpp b/core/libs/prx/libkernel/System/src/Rtld.cpp
+index 92a6b34..4947104 100644
+--- a/core/libs/prx/libkernel/System/src/Rtld.cpp
++++ b/core/libs/prx/libkernel/System/src/Rtld.cpp
+@@ -9,6 +9,7 @@
+ #include <string>
+ #include "SceTypes.hpp"
+ #include "prx/libc/include/General.hpp"
++#include "prx/libc/include/specifics/freebsd/Compat.hpp"
+ #include "prx/libkernel/Pthread/include/ThreadLifecycle.hpp"
+ #ifdef _WIN32
+ #ifndef NOMINMAX

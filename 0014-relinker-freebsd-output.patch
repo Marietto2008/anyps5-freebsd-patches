@@ -1,0 +1,178 @@
+diff --git a/core/relinker/cli/include/Cli.hpp b/core/relinker/cli/include/Cli.hpp
+index 244313d..85c919c 100644
+--- a/core/relinker/cli/include/Cli.hpp
++++ b/core/relinker/cli/include/Cli.hpp
+@@ -23,6 +23,7 @@ struct Args {
+     bool writeRegistry = false;
+     bool toWindows = false;
+     bool toMacos = false;
++    bool toFreebsd = false;
+     bool lazyBinding = false;
+     bool omitUnavailableDependencies = false;
+     bool autorun = false;
+diff --git a/core/relinker/cli/src/CliArgs.cpp b/core/relinker/cli/src/CliArgs.cpp
+index 9be4a05..7bbfea3 100644
+--- a/core/relinker/cli/src/CliArgs.cpp
++++ b/core/relinker/cli/src/CliArgs.cpp
+@@ -19,6 +19,7 @@ const char* Usage() {
+            "Output:\n"
+            "  --windows                      Produce a Windows PE executable.\n"
+            "  --macos                        Produce an x86-64 Mach-O executable; bundled modules become Mach-O libraries.\n"
++           "  --freebsd                      Produce the Linux-format ELF for FreeBSD: FreeBSD OSABI, /libexec/ld-elf.so.1.\n"
+            "  --windows-diagnostics          Include startup dependency diagnostics. Requires --windows.\n"
+            "  --windows-gui                  Select the Windows GUI subsystem. Requires --windows.\n"
+            "  --to-intel                     Convert supported AMD-only instructions for Intel CPUs.\n"
+@@ -73,7 +74,7 @@ namespace {
+ 
+ constexpr std::string_view kVerifyRejectedOptions[] = {
+     "--dry-run",
+-    "--windows", "--macos", "--windows-gui", "--windows-diagnostics", "--windows-fixed-base", "--trace-imports", "--linux-fixed-base", "--macos-fixed-base",
++    "--windows", "--macos", "--freebsd", "--windows-gui", "--windows-diagnostics", "--windows-fixed-base", "--trace-imports", "--linux-fixed-base", "--macos-fixed-base",
+     "--to-intel", "--to-rosetta", "--to-avx", "--frame-red-zone", "--skip-syscall-check", "--trap-sdk-syscall-stubs", "--function-symbol-roots", "unused-filter=",
+     "--rpath", "--registry", "--omit-unavailable-dependencies", "--lazy-binding", "--autorun", "--patches", "--no-patches",
+ };
+@@ -208,6 +209,8 @@ Args ParseArgs(int argc, char* argv[]) {
+             args.toWindows = true;
+         } else if (arg == "--macos") {
+             args.toMacos = true;
++        } else if (arg == "--freebsd") {
++            args.toFreebsd = true;
+         } else if (arg == "--lazy-binding") {
+             args.lazyBinding = true;
+         } else if (arg == "--omit-unavailable-dependencies") {
+@@ -258,6 +261,8 @@ Args ParseArgs(int argc, char* argv[]) {
+ 
+     if (args.toWindows && args.toMacos)
+         throw std::runtime_error("--windows conflicts with --macos");
++    if (args.toFreebsd && (args.toWindows || args.toMacos))
++        throw std::runtime_error("--freebsd cannot be used with --windows or --macos");
+     if (args.toRosetta && args.toWindows)
+         throw std::runtime_error("--to-rosetta conflicts with --windows");
+     if (args.toAvx && !args.toMacos)
+diff --git a/core/relinker/elfpatcher/include/elfpatcher/linux/LinuxOutputFlavor.hpp b/core/relinker/elfpatcher/include/elfpatcher/linux/LinuxOutputFlavor.hpp
+new file mode 100644
+index 0000000..05cd31e
+--- /dev/null
++++ b/core/relinker/elfpatcher/include/elfpatcher/linux/LinuxOutputFlavor.hpp
+@@ -0,0 +1,19 @@
++#ifndef ELFPATCHER_LINUX_LINUXOUTPUTFLAVOR_HPP
++#define ELFPATCHER_LINUX_LINUXOUTPUTFLAVOR_HPP
++
++namespace Elfpatcher::Linux {
++
++// --freebsd: the Linux ELF writers produce the same image for a FreeBSD host instead. Three differences, all in the
++// container: EI_OSABI is ELFOSABI_FREEBSD (the PS5 executable's own value) instead of 0, PT_INTERP is FreeBSD's
++// /libexec/ld-elf.so.1, and guest modules do not depend on ld-linux-x86-64.so.2 for __tls_get_addr (FreeBSD's
++// run-time linker exports it itself). Set once by the command line before any conversion; false by default.
++inline bool& FreeBsdOutput() {
++    static bool freebsd = false;
++    return freebsd;
++}
++
++inline constexpr unsigned char ElfOsAbiFreeBsd = 9;
++
++}
++
++#endif
+diff --git a/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp b/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
+index 773d67d..98e639e 100644
+--- a/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
++++ b/core/relinker/elfpatcher/src/linux/LinuxElfPatcher.cpp
+@@ -1,4 +1,5 @@
+ #include <elfpatcher/linux/LinuxElfPatcher.hpp>
++#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
+ #include <elfpatcher/general/AddressDistance.hpp>
+ #include <elfpatcher/general/ElfConstants.hpp>
+ #include <elfpatcher/general/ProgramHeaderLayoutRequest.hpp>
+@@ -467,6 +468,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
+ 
+     const std::uint32_t type = _fixedBase ? ET_EXEC : ET_DYN;
+     std::fill_n(buf.begin() + static_cast<std::ptrdiff_t>(kEhdrOsAbiOffset), 9, std::uint8_t{0});
++    if (FreeBsdOutput()) buf[kEhdrOsAbiOffset] = ElfOsAbiFreeBsd;
+     buf[kEhdrTypeOffset] = static_cast<std::uint8_t>(type & 0xFF);
+     buf[kEhdrTypeOffset + 1] = static_cast<std::uint8_t>((type >> 8) & 0xFF);
+     _byteWriter->WriteU64(buf, kEhdrShOffOffset, 0);
+@@ -777,9 +779,11 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
+     for (const auto& site : trampolines)
+         _appendTrampoline(buf, site, extraBlockOff, vaddrOfExtraBlockOffset);
+ 
+-    static constexpr char kInterp[] = "/lib64/ld-linux-x86-64.so.2";
++    static constexpr char kLinuxInterp[] = "/lib64/ld-linux-x86-64.so.2";
++    static constexpr char kFreeBsdInterp[] = "/libexec/ld-elf.so.1";
++    const std::string_view kInterp = FreeBsdOutput() ? std::string_view(kFreeBsdInterp, sizeof(kFreeBsdInterp)) : std::string_view(kLinuxInterp, sizeof(kLinuxInterp));
+     const auto interpOff = static_cast<std::uint64_t>(buf.size());
+-    constexpr std::uint64_t interpSize = sizeof(kInterp);
++    const std::uint64_t interpSize = kInterp.size();
+     for (char i : kInterp)
+         buf.push_back(static_cast<std::uint8_t>(i));
+ 
+diff --git a/core/relinker/elfpatcher/src/linux/LinuxGuestModuleWriter.cpp b/core/relinker/elfpatcher/src/linux/LinuxGuestModuleWriter.cpp
+index fe388db..b8b47f3 100644
+--- a/core/relinker/elfpatcher/src/linux/LinuxGuestModuleWriter.cpp
++++ b/core/relinker/elfpatcher/src/linux/LinuxGuestModuleWriter.cpp
+@@ -1,6 +1,7 @@
+ #include <elfpatcher/general/GuestModuleWriter.hpp>
+ #include <elfpatcher/general/AddressDistance.hpp>
+ #include <elfpatcher/general/ElfConstants.hpp>
++#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
+ #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
+ #include <codegen/x86/StubBodyBuilder.hpp>
+ #include <io/BufferUtils.hpp>
+@@ -116,7 +117,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
+     }
+     std::vector<std::uint64_t> needed;
+     for (const auto& dependency : dependencies) needed.push_back(addString(dependency));
+-    if (needsTlsResolver) needed.push_back(addString("ld-linux-x86-64.so.2"));
++    if (needsTlsResolver && !Linux::FreeBsdOutput()) needed.push_back(addString("ld-linux-x86-64.so.2"));
+     const auto addUndefinedImport = [&](const std::string& name) {
+         const auto nameOffset = addString(name);
+         const auto entry = symbols.size();
+@@ -373,6 +374,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
+         Io::AppendU64(bytes, header.Alignment);
+     }
+     std::fill_n(bytes.begin() + 7, 9, std::uint8_t{0});
++    if (Linux::FreeBsdOutput()) bytes[7] = Linux::ElfOsAbiFreeBsd;
+     Io::WriteU16(bytes, 16, 3);
+     Io::WriteU64(bytes, 24, 0);
+     Io::WriteU64(bytes, 32, phOffset);
+diff --git a/core/relinker/main.cpp b/core/relinker/main.cpp
+index 69fb7a7..9844aa4 100644
+--- a/core/relinker/main.cpp
++++ b/core/relinker/main.cpp
+@@ -8,6 +8,7 @@
+ #include <io/NativePath.hpp>
+ #include <io/FileIdentity.hpp>
+ #include <elfpatcher/linux/LinuxDesktopEntryWriter.hpp>
++#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
+ #include <io/FileWriter.hpp>
+ #include <relinker/output/CallRegistryWriter.hpp>
+ #include <codegen/CodegenException.hpp>
+@@ -85,6 +86,7 @@ ConvertedExecutable Convert(const Cli::Args& args, const std::string& inputPath,
+     options.WindowsFixedBase = mainExecutable ? args.windowsFixedBase : std::nullopt;
+     options.WindowsDiagnostics = args.windowsDiagnostics && mainExecutable;
+     options.LinuxFixedBase = args.linuxFixedBase;
++    Elfpatcher::Linux::FreeBsdOutput() = args.toFreebsd;
+     options.MacosFixedBase = args.macosFixedBase;
+     options.ExcludedModules = args.excludedSceModules;
+     options.Patches = patches;
+diff --git a/core/relinker/relinker/src/pipeline/Conversion.cpp b/core/relinker/relinker/src/pipeline/Conversion.cpp
+index dd59c11..57e5a06 100644
+--- a/core/relinker/relinker/src/pipeline/Conversion.cpp
++++ b/core/relinker/relinker/src/pipeline/Conversion.cpp
+@@ -1,6 +1,7 @@
+ #include <domain/Types.hpp>
+ #include <io/NativePath.hpp>
+ #include <elfpatcher/linux/LinuxElfPatcher.hpp>
++#include <elfpatcher/linux/LinuxOutputFlavor.hpp>
+ #include <elfpatcher/general/SegmentFilter.hpp>
+ #include <elfpatcher/general/EntryStubBuilder.hpp>
+ #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
+@@ -104,7 +105,7 @@ ConversionOutput Conversion::Convert(ConversionInput input, const ConversionOpti
+         options.UnusedFilterLevel, inputProgress, options.FunctionSymbolRoots
+     );
+ 
+-    { std::ostringstream message; message << "System: " << (windows ? "Windows" : macos ? "macOS" : "Linux") << "; unused-filter=" << options.UnusedFilterLevel << "\n"; inputProgress.Message(message.str()); }
++    { std::ostringstream message; message << "System: " << (windows ? "Windows" : macos ? "macOS" : Elfpatcher::Linux::FreeBsdOutput() ? "FreeBSD" : "Linux") << "; unused-filter=" << options.UnusedFilterLevel << "\n"; inputProgress.Message(message.str()); }
+     for (const auto& name : options.ExcludedModules) { std::ostringstream message; message << "Guest module excluded: " << name << '\n'; inputProgress.Message(message.str()); }
+     auto result = pipeline->Relink();
+     sourceBytes = elfReader->TakeBytes();

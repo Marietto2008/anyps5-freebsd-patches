@@ -2,6 +2,16 @@
 
 Commit di riferimento: `9c16c9b09e5be534780503689411404e68f670be`, quello che lo stage verifica.
 
+**Installazione automatica.** `stage/installa-anyps5-freebsd.sh` fa tutto da zero su FreeBSD 16 amd64, come
+utente normale (pkg via sudo), nella cartella corrente o in `BASE_DIR`:
+- installa i pacchetti;
+- clona AnyPS5 al commit collaudato, questa serie e gli script di stage;
+- lancia stage 1, fetch dei submodule e patch dello stage 3;
+- ricompila il relinker con le patch (lo stage 1 lo compila prima, senza `--freebsd`);
+- costruisce FFmpeg e il runtime con le 413 librerie PS5.
+Opzioni `--senza-pacchetti` e `--con-test` (stage 2), `JOBS=<n>`. Avvisa se manca
+`kern.proc_vmmap_skip_resident_count=1`. Scritto il 21/11/2026, non ancora collaudato da zero.
+
 **Disposizione delle cartelle.** Gli script di stage stanno in `stage/`. Si copiano nella cartella di lavoro
 (`BASE_DIR`, quella dello script), accanto a questo repository clonato col nome `anyps5_freebsd_patches`:
 
